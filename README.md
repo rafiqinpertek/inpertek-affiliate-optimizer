@@ -1,27 +1,37 @@
-# INPERTEK Affiliate INSERT Pilot V3
+# INPERTEK Affiliate Commission Optimizer V5 — Multi-Master
 
-## Prinsip: master 100% read-only
-File INSERT.xlsx hanya dibaca, tidak pernah ditulis. Snapshot SQLite lokal dan berkas kandidat Excel terpisah. Tidak ada perubahan otomatis ke marketplace.
+## Deploy (tanpa Supabase)
 
-## Menjalankan
-1. Ekstrak ZIP -> File > Open Folder di VS Code -> pilih `INPERTEK_INSERT_PILOT`.
-2. `python -m pip install -r requirements.txt`
-3. `python -m streamlit run app.py`
-4. Buka http://localhost:8501.
-5. Bila punya data hasil sync lama, backup dan gunakan `insert_pilot.sqlite` milik aplikasi lama agar histori tidak tertimpa.
+1. Backup file V3 dan download histori Excel apabila diperlukan.
+2. Ganti `app.py`, `engine.py`, `requirements.txt`, `README.md`; tambahkan `.gitignore` pada GitHub repository **Private**.
+3. Jangan upload file Excel master, HPP, kredensial, maupun `*.sqlite`.
+4. Streamlit Cloud akan redeploy otomatis. Pastikan **Sharing** hanya untuk pengguna yang diizinkan.
+5. Upload satu atau beberapa master XLSX lewat website. Utamakan tab hijau; aplikasi menahan sheet yang mapping-nya tidak lolos verifikasi.
+6. Unduh Excel hasil review sebelum reboot server. SQLite di Streamlit Community Cloud sementara, tidak permanen.
 
-## Logika komisi
-- Komisi otomatis dari sebagian ruang margin aman tiap produk (pengaturan default 50% headroom). Ini **parameter contoh**, bukan kebijakan resmi perusahaan.
-- Normal: margin sesudah komisi baru >= 0, >= komisi baru, dan >= margin dilindungi (default 50% margin sebelum komisi).
-- Bila ruang tidak mencukupi: TURUNKAN atau REVIEW NONAKTIF; file master tetap.
-- Mode PELUANG KHUSUS hanya simulasi, margin tidak boleh negatif, tidak diikutkan ke kandidat ekspor.
-- Angka Rupiah ditampilkan sebagai Rp1.234 dan di Excel sebagai angka dengan format Rupiah agar tetap dapat dihitung.
-- Excel kandidat berisi perubahan komisi saja yang lolos pemeriksaan, mengeluarkan data validasi, tetap, nonaktif, peluang khusus, dan SKU sama di beberapa sheet pada marketplace sama.
-- File kandidat **bukan** template upload resmi marketplace. Perlu pencocokan SKU aktif, aturan komisi, dan template Shopee/Tokopedia/TikTok.
+## Kebijakan
 
-## Batasan pilot
-- Mapping warna hijau dan kolom pilot INSERT belum dinamis untuk 25 master lain.
-- Harga jual dipakai sebagai estimasi basis biaya affiliate; validasi bila platform memakai basis berbeda.
-- Margin diasumsikan sudah dikurangi biaya affiliate awal yang terdapat di master.
-- Snapshot awal bawaan adalah data historis, bukan live connection Drive / marketplace.
-- Kandidat dengan SKU ganda lintas-sheet ditahan dari ekspor.
+- Master adalah **read-only**. Tidak ada penulisan atau perubahan terhadap master asli.
+- Komisi diasumsikan dihitung dari **harga jual**. Tarif master dalam pecahan desimal (`0.03` = `3%`).
+- Margin master diasumsikan **sudah dikurangi** biaya affiliate awal. Perhitungan mengembalikan biaya awal satu kali.
+- Usulan normal mempertahankan margin baru ≥ biaya komisi baru, ≥ minimum margin yang dipilih, dan tidak negatif.
+- Agresif menggunakan 85% ruang kenaikan aman. Batas nominal/komisi yang berlaku harus dicek ke marketplace.
+- Data invalid, mapping meragukan, SKU duplikat lintas master tidak masuk kandidat perubahan.
+- Ekspor KANDIDAT_REVIEW **bukan template resmi** untuk upload marketplace.
+
+## Batasan
+
+- Hanya worksheet yang bertab hijau RGB `92D050` yang dianalisis.
+- Mapping standar saat ini: `D` SKU, `E` Nama, `N` HPP; Tokopedia `CC DA DB DH`; Shopee `EM FL FM FS`.
+- Mapping diverifikasi melalui kecocokan **harga × rate = nominal fee** pada sampel per sheet. Sheet yang tidak cocok diskip, tidak diinterpretasi sembarangan.
+- Identitas master berdasarkan **nama file**; jika upload ulang gunakan nama file sama untuk mendeteksi perubahan.
+- Snapshot/riwayat disimpan sementara di `optimizer_v5.sqlite` pada server Streamlit; reboot/redeploy dapat menghilangkannya.
+- V5 membangun baseline baru; SQLite V3 lama tidak otomatis dimigrasikan.
+- Backend bukan database permanen / Google Drive sync.
+
+## Lokal
+
+```bash
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+```
