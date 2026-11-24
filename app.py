@@ -1,6 +1,5 @@
 """Dashboard pilot INSERT: master read-only, explanations and balanced affiliate rate rules."""
 import os
-import sqlite3
 import tempfile
 from io import BytesIO
 from openpyxl import Workbook
@@ -8,16 +7,30 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 import pandas as pd
 import streamlit as st
-from engine import sync, recommend_balanced
+from engine import recommend_balanced
+from cloud_store import init_cloud, read_query, sync_cloud
 
 st.set_page_config(page_title='INPERTEK | Affiliate Commission Optimizer',layout='wide',page_icon='📊')
 def rupiah(v):
     if pd.isna(v):return '-'
     return ('-Rp' if float(v)<0 else 'Rp')+f'{abs(float(v)):,.0f}'.replace(',','.')
 
-DB=os.environ.get('INSERT_PILOT_DB',os.path.join(os.path.dirname(__file__),'insert_pilot.sqlite'))
+# Cloud-only: fail closed if the DATABASE_URL secret is missing.
+# Never display database URLs, passwords, or raw connection exceptions.
+try:
+    DATABASE_URL = st.secrets.get('DATABASE_URL', os.environ.get('DATABASE_URL', ''))
+except Exception:
+    DATABASE_URL = os.environ.get('DATABASE_URL', '')
+if not DATABASE_URL:
+    st.error('Database PostgreSQL belum diatur. Masukkan DATABASE_URL di Settings → Secrets pada Streamlit Cloud.')
+    st.stop()
+try:
+    init_cloud(DATABASE_URL)
+except Exception:
+    st.error('Database belum bisa dihubungi. Periksa DATABASE_URL, SSL, dan pengaturan jaringan Supabase. Kredensial tidak ditampilkan demi keamanan.')
+    st.stop()
 
-st.title('INPERTEK | Affiliate Commission Optimizer V3')
+st.title('INPERTEK | Affiliate Commission Optimizer V4 · PostgreSQL')
 st.caption('PILOT MASTER INSERT · TOKOPEDIA (termasuk TikTok Shop) + SHOPEE · Master dan komisi marketplace tidak diubah.')
 st.info('**MASTER READ-ONLY:** file master tidak pernah ditulis/diubah oleh aplikasi. Hasil analisis dan file kandidat update dibuat terpisah. **Arti rekomendasi:** perhitungan adalah simulasi dari margin master SETELAH komisi affiliate. Aturan standar menjaga **sisa margin setelah komisi usulan minimal sama dengan biaya komisi usulan**. Pengecualian peluang khusus perlu persetujuan manual.')
 
@@ -29,23 +42,28 @@ with st.sidebar:
             tmp.write(upload.getbuffer());path=tmp.name
         try:
             with st.spinner('Membaca worksheet hijau dan membandingkan snapshot...'):
-                res=sync(path,DB)
+                res=sync_cloud(path,DATABASE_URL)
             st.success('Sinkronisasi: '+str(res))
         except Exception as e:
-            st.error('Sinkronisasi gagal: '+str(e))
+            st.error('Sinkronisasi gagal. Periksa format master INSERT, tab hijau, dan koneksi database. Detail kredensial disembunyikan.')
         finally:
             os.remove(path)
 
-if not os.path.exists(DB):
-    st.warning('Belum ada database. Unggah master INSERT untuk membuat snapshot pertama.')
+try:
+    runs=read_query(DATABASE_URL,'SELECT * FROM sync_runs ORDER BY run_id DESC')
+except Exception:
+    st.error('Tidak bisa membaca histori PostgreSQL. Periksa pengaturan Supabase.')
     st.stop()
-con=sqlite3.connect(DB)
-runs=pd.read_sql_query('SELECT * FROM sync_runs ORDER BY run_id DESC',con)
 if runs.empty:
-    st.warning('Database belum berisi snapshot.');con.close();st.stop()
+    st.warning('Database PostgreSQL belum berisi snapshot. Unggah master INSERT untuk membuat snapshot pertama. Master hanya dibaca, tidak dimodifikasi.')
+    st.stop()
 latest=runs.iloc[0]
 run_id=int(latest.run_id)
-base=pd.read_sql_query('SELECT * FROM records WHERE run_id=?',con,params=(run_id,))
+try:
+    base=read_query(DATABASE_URL,'SELECT * FROM records WHERE run_id=?',(run_id,))
+except Exception:
+    st.error('Gagal mengambil data produk dari PostgreSQL.')
+    st.stop()
 
 with st.sidebar:
     st.header('2 · Filter produk')
@@ -243,7 +261,7 @@ with tabs[0]:
             st.caption(f"Sumber: 01. INSERT.xlsx · {r['source_sheet']} · baris {r['source_row']} · {r['marketplace']}")
 with tabs[1]:
     st.subheader('Perubahan data sejak snapshot sebelumnya')
-    changes=pd.read_sql_query('SELECT * FROM changes WHERE run_id=?',con,params=(run_id,))
+    changes=read_query(DATABASE_URL,'SELECT * FROM changes WHERE run_id=?',(run_id,))
     if changes.empty:st.info('Belum ada perubahan. Snapshot pertama jadi baseline. Upload master yang sudah diperbarui untuk membandingkan.')
     else:
         translation={'marketplace':'MARKETPLACE','source_sheet':'SHEET SUMBER','sku':'SKU','field':'KOLOM YANG BERUBAH','previous_value':'NILAI LAMA','new_value':'NILAI TERBARU','event_type':'JENIS PERUBAHAN'}
@@ -251,7 +269,7 @@ with tabs[1]:
         st.download_button('Download perubahan CSV',changes.to_csv(index=False).encode('utf-8-sig'),'INSERT_PERUBAHAN.csv')
 with tabs[2]:
     st.subheader('Daftar data yang perlu diperiksa')
-    bad=pd.read_sql_query('SELECT * FROM issues WHERE run_id=?',con,params=(run_id,))
+    bad=read_query(DATABASE_URL,'SELECT * FROM issues WHERE run_id=?',(run_id,))
     st.warning('SKU dengan data kosong/komisi tidak cocok/duplikat tidak dihitung sebagai rekomendasi aman. Kolom validasi menjelaskan penyebabnya.')
     st.dataframe(bad.rename(columns={'source_sheet':'SHEET','source_row':'BARIS','marketplace':'MARKETPLACE','sku':'SKU','issue':'ALASAN VALIDASI'}),use_container_width=True,hide_index=True)
 with tabs[3]:
@@ -277,4 +295,3 @@ with tabs[4]:
     st.json({'SKU':'D','NAMA':'E','HPP':'N','TOKOPEDIA':{'HARGA':'CC','BIAYA_AFFILIATE_RP':'DA','KOMISI_PERSEN':'DB','MARGIN_RP':'DH','MARGIN_PERSEN':'DI'},'SHOPEE':{'HARGA':'EM','BIAYA_AFFILIATE_RP':'FL','KOMISI_PERSEN':'FM','MARGIN_RP':'FS','MARGIN_PERSEN':'FT'}})
     st.dataframe(runs,use_container_width=True,hide_index=True)
     st.caption('Tab hijau dipilih sebagai sumber prioritas. Mapping aktual per sheet harus tetap divalidasi; pilot ini belum sinkron langsung dengan Drive.')
-con.close()
