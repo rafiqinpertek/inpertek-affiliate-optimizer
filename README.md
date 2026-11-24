@@ -1,37 +1,32 @@
-# INPERTEK Affiliate Commission Optimizer V5 — Multi-Master
+# V5.2 · Elegant Hybrid UI Refresh
 
-## Deploy (tanpa Supabase)
+Desain baru: header premium navy-slate, sidebar dark, konten terang, aksen teal-biru, KPI cards, tab compact, tabel fokus keterbacaan. **Engine tidak berubah dari V5.1** dan kelipatan komisi tetap 1 poin persentase.
 
-1. Backup file V3 dan download histori Excel apabila diperlukan.
-2. Ganti `app.py`, `engine.py`, `requirements.txt`, `README.md`; tambahkan `.gitignore` pada GitHub repository **Private**.
-3. Jangan upload file Excel master, HPP, kredensial, maupun `*.sqlite`.
-4. Streamlit Cloud akan redeploy otomatis. Pastikan **Sharing** hanya untuk pengguna yang diizinkan.
-5. Upload satu atau beberapa master XLSX lewat website. Utamakan tab hijau; aplikasi menahan sheet yang mapping-nya tidak lolos verifikasi.
-6. Unduh Excel hasil review sebelum reboot server. SQLite di Streamlit Community Cloud sementara, tidak permanen.
+Tidak ada dependensi UI baru. Cukup ganti file `app.py` di GitHub dengan versi ini untuk update desain; file lain disertakan agar paket lengkap. Jangan upload file XLSX, SQLite, atau rahasia.
 
-## Kebijakan
+# INPERTEK AFFILIATE COMMISSION OPTIMIZER V5.2
 
-- Master adalah **read-only**. Tidak ada penulisan atau perubahan terhadap master asli.
-- Komisi diasumsikan dihitung dari **harga jual**. Tarif master dalam pecahan desimal (`0.03` = `3%`).
-- Margin master diasumsikan **sudah dikurangi** biaya affiliate awal. Perhitungan mengembalikan biaya awal satu kali.
-- Usulan normal mempertahankan margin baru ≥ biaya komisi baru, ≥ minimum margin yang dipilih, dan tidak negatif.
-- Agresif menggunakan 85% ruang kenaikan aman. Batas nominal/komisi yang berlaku harus dicek ke marketplace.
-- Data invalid, mapping meragukan, SKU duplikat lintas master tidak masuk kandidat perubahan.
-- Ekspor KANDIDAT_REVIEW **bukan template resmi** untuk upload marketplace.
+## Multi-master + kelengkapan fitur V3
 
-## Batasan
+- Upload banyak master, identitas dan perubahan masing-masing master terpisah. Nama file harus sama saat memperbarui snapshot.
+- Hanya sheet hijau, dengan validasi mapping. Sheet tidak cocok dilewati.
+- Analisis lengkap, detail SKU dan rumus, penjelasan kolom, validasi, histori per master, ekspor Excel dan CSV.
+- Mode agresif / seimbang / konservatif. Peluang khusus opsional tidak otomatis masuk ekspor. Batas kenaikan opsional.
+- **Komisi USULAN SELALU kelipatan 1 poin persentase** (1%, 2%, 3%, dst). Persentase awal tetap dibaca apa adanya.
+- Perlindungan margin normal: margin baru >= komisi baru; minimum margin; dan margin baru tidak negatif.
+- Master asli read-only. No Supabase. SQLite sementara dan upload master di Streamlit Cloud akan diproses di server; selalu cadangkan ekspor.
+- Tidak ada upload langsung marketplace; keluaran belum template resmi dan harus direview.
 
-- Hanya worksheet yang bertab hijau RGB `92D050` yang dianalisis.
-- Mapping standar saat ini: `D` SKU, `E` Nama, `N` HPP; Tokopedia `CC DA DB DH`; Shopee `EM FL FM FS`.
-- Mapping diverifikasi melalui kecocokan **harga × rate = nominal fee** pada sampel per sheet. Sheet yang tidak cocok diskip, tidak diinterpretasi sembarangan.
-- Identitas master berdasarkan **nama file**; jika upload ulang gunakan nama file sama untuk mendeteksi perubahan.
-- Snapshot/riwayat disimpan sementara di `optimizer_v5.sqlite` pada server Streamlit; reboot/redeploy dapat menghilangkannya.
-- V5 membangun baseline baru; SQLite V3 lama tidak otomatis dimigrasikan.
-- Backend bukan database permanen / Google Drive sync.
+## Deploy
 
-## Lokal
+Replace app.py, engine.py, requirements.txt, README.md and .gitignore in the GitHub repository; jangan upload master, SQLite, atau data internal. Branch main, main file app.py.
 
-```bash
-python -m pip install -r requirements.txt
-python -m streamlit run app.py
-```
+## Test
+
+`python -m pip install -r requirements.txt`
+`python -m streamlit run app.py`
+`python test_v51.py` (memerlukan lima master contoh pada /mnt/data di lingkungan pengembangan).
+
+## Catatan
+
+Migrasi SQLite V5 lama tidak otomatis terjadi apabila file database hilang pada cloud. Nama DB V5 tetap optimizer_v5.sqlite agar kompatibel selama database sebelumnya masih tersedia.

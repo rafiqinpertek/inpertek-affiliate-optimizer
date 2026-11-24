@@ -139,9 +139,11 @@ def validate(rec):
     if not errs and abs(rec['price']*rec['old_pct']/100-rec['old_fee'])>max(3,rec['old_fee']*0.002):errs.append('BIAYA_KOMISI_TIDAK_COCOK')
     return 'OK' if not errs else '; '.join(errs)
 
-def analyze(rec, retained_share=.30, min_profit=0, max_pct=30, target_pct=30, headroom=.85, step=.5):
+def analyze(rec, retained_share=.30, min_profit=0, max_pct=30, target_pct=30, headroom=.85, step=1.0, max_increase=None, opportunity_mode=False, opportunity_ratio=.75):
+    if step != 1.0: raise ValueError('Kelipatan wajib 1 poin persentase')
     out={'status':'VALIDASI DATA','proposed_pct':None,'proposed_fee':None,'margin_before':None,'margin_new':None,'safe_cap':None,'reason':'','balance':None,'auto_eligible':False}
     if rec['validation']!='OK':out['reason']=rec['validation'];return out
+    if max_increase is not None and (not math.isfinite(float(max_increase)) or max_increase < 0):raise ValueError('Batas kenaikan tidak valid')
     price=float(rec['price']);old=float(rec['old_pct']);fee=float(rec['old_fee']);after=float(rec['old_margin'])
     before=after+fee;out['margin_before']=before
     if before<=0:
@@ -160,13 +162,30 @@ def analyze(rec, retained_share=.30, min_profit=0, max_pct=30, target_pct=30, he
         status='TURUNKAN';reason='Komisi awal melebihi batas margin yang aman.'
     else:
         new=math.floor((old+(max(0,cap-old)*headroom)+1e-10)/step)*step
-        new=max(old,min(new,cap))
-        status='NAIK' if new>old+1e-8 else 'TETAP'
+        if max_increase is not None:new=min(new,math.floor((old+max_increase+1e-10)/step)*step)
+        # Original fractional rates may remain only when no change is proposed; export only whole-number proposals.
+        if new<old:
+            new=math.ceil(old) if math.ceil(old)<=cap and (max_increase is None or math.ceil(old)<=old+max_increase+1e-9) else math.floor(old)
+        new=min(new,cap)
+        if old!=int(old) and new==old:new=math.floor(old)
+        new=max(0,new)
+        status='NAIK' if new>old+1e-8 else ('TURUNKAN' if new<old-1e-8 else 'TETAP')
         reason='Kenaikan dihitung otomatis dari kapasitas margin produk.' if status=='NAIK' else 'Kenaikan belum memenuhi kelipatan atau batas margin.'
     cost=price*new/100;remain=before-cost
     if remain < -0.01 or remain+0.01<cost or remain+0.01<retained:
         out.update(status='VALIDASI DATA',reason='Pemeriksaan akhir perlindungan margin gagal');return out
     out.update(status=status,proposed_pct=round(new,4),proposed_fee=cost,margin_new=remain,balance=remain-cost,reason=reason,auto_eligible=status in ('NAIK','TURUNKAN'))
+    # Special scenario mirrors V3: never auto-approved, never a negative margin.
+    if opportunity_mode and status in ('NAIK','TETAP') and before > 0:
+        special_limit=min(max_pct,target_pct,(before-retained)*100/price)
+        if max_increase is not None:special_limit=min(special_limit,old+max_increase)
+        special=math.floor(special_limit+1e-10)
+        special_fee=price*special/100;special_remain=before-special_fee
+        if (special>new and special_remain>=-0.01 and special_remain+0.01>=retained
+            and special_remain+0.01 < special_fee and special_remain+0.01>=opportunity_ratio*special_fee):
+            out.update(status='PELUANG KHUSUS - REVIEW',proposed_pct=float(special),proposed_fee=special_fee,
+                       margin_new=special_remain,balance=special_remain-special_fee,auto_eligible=False,
+                       reason='Pengecualian: margin positif tetapi lebih kecil daripada biaya affiliate baru. Review manual wajib; jangan ekspor sebagai kandidat otomatis.')
     return out
 
 def sync_many(paths, db_path, overrides=None):
