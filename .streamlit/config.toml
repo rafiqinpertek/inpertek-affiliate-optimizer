@@ -1,0 +1,21 @@
+# Tema visual V5.3 "Spektrum". Hanya tampilan; tidak memengaruhi logika.
+[theme]
+base = "dark"
+primaryColor = "#8B7BFF"
+backgroundColor = "#10132A"
+secondaryBackgroundColor = "#1A1E40"
+textColor = "#ECEBFF"
+linkColor = "#5CE1FF"
+font = "Manrope:https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap, sans-serif"
+headingFont = "Unbounded:https://fonts.googleapis.com/css2?family=Unbounded:wght@500;600;700&display=swap, sans-serif"
+blueColor = "#5CE1FF"
+violetColor = "#8B7BFF"
+greenColor = "#7CF2C4"
+yellowColor = "#FFB547"
+orangeColor = "#FFB547"
+redColor = "#FF6B8B"
+grayColor = "#A3A6D4"
+
+[theme.sidebar]
+backgroundColor = "#0C0F23"
+secondaryBackgroundColor = "#1A1E40"
