@@ -1,3 +1,9 @@
+# V5.3 · Desain "Spektrum"
+
+Tampilan baru: tema gelap indigo dengan aksen spektrum cyan–iris–magenta, font Unbounded + Manrope, panel "Spektrum rekomendasi" yang menampilkan sebaran status, dan tab bergaya segmented control. **Engine dan logika perhitungan tidak berubah dari V5.2.**
+
+File yang diganti/ditambah: `app.py` dan `.streamlit/config.toml` (tema warna & font). Keduanya wajib di-upload agar tampilan sesuai.
+
 # V5.2 · Elegant Hybrid UI Refresh
 
 Desain baru: header premium navy-slate, sidebar dark, konten terang, aksen teal-biru, KPI cards, tab compact, tabel fokus keterbacaan. **Engine tidak berubah dari V5.1** dan kelipatan komisi tetap 1 poin persentase.

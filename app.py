@@ -1,5 +1,5 @@
 """INPERTEK multi-master read-only commission optimizer. No Supabase required."""
-import os, tempfile
+import html, os, tempfile
 from io import BytesIO
 import pandas as pd
 import streamlit as st
@@ -8,97 +8,101 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from engine import db_connect, sync_many, analyze
 
-st.set_page_config(page_title='INPERTEK | Affiliate Optimizer V5.2',page_icon='📈',layout='wide')
+st.set_page_config(page_title='INPERTEK | Affiliate Optimizer V5.3',page_icon='📈',layout='wide')
 
 # Application visual shell: premium, restrained dark-light hybrid.
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
-:root { --ink:#182a42; --muted:#60758b; --border:#dce5ef; --navy:#111e31; --teal:#0f827b; --blue:#2b6cb0; }
-html, body, [class*="css"], [data-testid="stApp"] { font-family:'DM Sans',sans-serif; }
-[data-testid="stAppViewContainer"] { background:linear-gradient(135deg,#f4f7fb 0%,#fafcff 60%,#f4f8fb 100%); color:var(--ink); }
-[data-testid="stMainBlockContainer"] { padding-top:1.7rem; padding-bottom:4rem; max-width:1600px; }
-[data-testid="stSidebar"] { background:linear-gradient(175deg,#15263c 0%,#101c2c 100%); }
-[data-testid="stSidebar"] * { color:#e8eff7; }
-[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p { color:#d4e0ef!important; font-weight:600; }
-[data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color:white!important; letter-spacing:.01em; }
-[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {color:#9fb3c8!important;}
-[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {background:#1d324c;border:1px dashed #52718e;border-radius:12px;}
-[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] *, [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] small {color:#e8eff7!important;}
-[data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div,
-[data-testid="stSidebar"] [data-testid="stTextInput"] input,
-[data-testid="stSidebar"] [data-testid="stNumberInput"] input { background:#20354e!important; color:#f4f7fc!important; border-color:#476078!important; }
-[data-testid="stSidebar"] [data-testid="stSlider"] [data-baseweb="slider"] { filter:saturate(.75); }
-[data-testid="stSidebar"] hr {border-color:#344960;}
-[data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"] {background:#16a39c;border:0;color:white;font-weight:700;}
-[data-testid="stSidebar"] [data-testid="stButton"] button[kind="primary"]:hover {background:#128b86;}
-.dashboard-hero { position:relative; overflow:hidden; background:linear-gradient(112deg,#172941 0%,#203c59 68%,#244f61 100%); border:1px solid #294461; border-radius:18px; padding:28px 34px; margin:4px 0 23px; box-shadow:0 12px 30px rgba(22,42,68,.09); }
-.dashboard-hero::after {content:'';position:absolute;right:-85px;top:-140px;height:340px;width:340px;border:1px solid rgba(170,225,231,.17);border-radius:50%;box-shadow:0 0 0 65px rgba(161,222,226,.035),0 0 0 130px rgba(161,222,226,.025);pointer-events:none;}
-.hero-eyebrow { font-size:11px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:#81d7cf; margin-bottom:7px; }
-.dashboard-hero h1 { margin:0!important; padding:0!important; color:#f7fbff!important; font-size:clamp(22px,2.4vw,35px)!important; line-height:1.25; letter-spacing:-.035em; font-weight:800; }
-.dashboard-hero p { color:#bdcedf!important; font-size:13px; margin:9px 0 0!important; }
-.hero-tags {display:flex;gap:9px;flex-wrap:wrap;margin-top:16px;}
-.hero-tag {display:inline-flex;align-items:center;border:1px solid #45627a;background:#ffffff09;border-radius:7px;color:#dceaf1;font-size:11px;padding:5px 10px;font-weight:650;}
-.section-kicker {font-size:11px;font-weight:800;color:#637d91;letter-spacing:.12em;text-transform:uppercase;margin:12px 0 0;}
-[data-testid="stMetric"] {background:white;border:1px solid #e2e9f1;border-radius:14px;padding:18px 19px;min-height:112px;box-shadow:0 5px 17px rgba(32,64,100,.035);}
-[data-testid="stMetricLabel"] {font-size:12px;color:#60758b;font-weight:650;}
-[data-testid="stMetricValue"] {font-size:clamp(20px,2vw,30px);color:#1a344f;font-weight:800;letter-spacing:-.03em;}
-[data-testid="stTabs"] [data-baseweb="tab-list"] {gap:5px;background:#eaf0f6;border-radius:12px;padding:5px;overflow-x:auto;}
-[data-testid="stTabs"] button[data-baseweb="tab"] {border-radius:8px;min-height:42px;font-size:12px;font-weight:700;color:#50657c;padding:0 12px;white-space:nowrap;}
-[data-testid="stTabs"] button[aria-selected="true"] {background:#fff;color:#164b70;box-shadow:0 2px 8px rgba(20,45,75,.10);}
-[data-testid="stTabs"] [data-baseweb="tab-highlight"], [data-testid="stTabs"] [data-baseweb="tab-border"] {display:none;}
-[data-testid="stDataFrame"] {border-radius:13px;overflow:hidden;border:1px solid var(--border);background:white;}
-[data-testid="stAlert"] {border-radius:11px;}
-[data-testid="stDownloadButton"] button {border-radius:9px;border:1px solid #c5d6e5;background:#fff;color:#204d72;font-weight:700;}
-[data-testid="stDownloadButton"] button:hover {border-color:#4392ac;color:#116f7b;}
-[data-testid="stExpander"] {border:1px solid #e0e8f0;border-radius:11px;background:white;}
-.stButton button {border-radius:9px;font-weight:700;}
-hr {border-color:#e1e8ee;}
-[data-testid="stCaptionContainer"] p {color:#728498;font-size:12px;}
-@media (max-width:720px){.dashboard-hero{padding:23px 20px}.dashboard-hero h1{font-size:23px!important}[data-testid="stMetric"]{padding:13px 12px;min-height:98px}}
+/* V5.3 SPEKTRUM - TAMPILAN SAJA. Warna dasar diatur di .streamlit/config.toml */
+@import url('https://fonts.googleapis.com/css2?family=Unbounded:wght@500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+:root{
+  --abyss:#10132A; --deck:#171B3A; --deck-2:#1D2247; --rim:#2B3166; --rim-soft:#232853;
+  --iris:#8B7BFF; --ion:#5CE1FF; --mint:#7CF2C4; --flare:#FFB547; --rose:#FF6B8B; --magenta:#E36BFF;
+  --frost:#ECEBFF; --haze:#A3A6D4; --dim:#7478A8;
+  --spectrum:linear-gradient(90deg,#5CE1FF 0%,#8B7BFF 52%,#E36BFF 100%);
+}
+html, body, [data-testid="stApp"] { font-family:'Manrope',sans-serif; }
+[data-testid="stApp"] {
+  background:
+    radial-gradient(1100px 520px at 92% -8%, rgba(139,123,255,.20), transparent 62%),
+    radial-gradient(800px 480px at -8% 105%, rgba(92,225,255,.08), transparent 60%),
+    var(--abyss);
+}
+[data-testid="stHeader"] { background:transparent; }
+[data-testid="stMainBlockContainer"] { max-width:1480px; padding-top:2.4rem; padding-bottom:4rem; }
+[data-testid="stMain"] h2, [data-testid="stMain"] h3 { font-family:'Unbounded',sans-serif; font-weight:600; letter-spacing:-.01em; font-size:1.15rem!important; color:var(--frost); }
+[data-testid="stCaptionContainer"] p { color:var(--haze)!important; }
+::selection { background:rgba(139,123,255,.45); }
 
-/* V5.2 PATCH: SOFT MIDNIGHT - VISUAL ONLY, NO BUSINESS LOGIC CHANGES */
-:root { --ink:#e6edf5; --muted:#adbdd0; --border:#354a60; --navy:#132237; --teal:#61c7bf; --blue:#80bdf3; }
-[data-testid="stAppViewContainer"],
-[data-testid="stMain"] { background:linear-gradient(145deg,#1b2b3d 0%,#202f41 55%,#19293a 100%)!important; color:#e6edf5!important; }
-[data-testid="stHeader"] { background:#162437!important; }
-[data-testid="stMainBlockContainer"] { color:#e6edf5!important; }
-[data-testid="stMain"] h1,
-[data-testid="stMain"] h2,
-[data-testid="stMain"] h3,
-[data-testid="stMain"] h4,
-[data-testid="stMain"] p,
-[data-testid="stMain"] label,
-[data-testid="stMain"] [data-testid="stMarkdownContainer"] {color:#e6edf5;}
-.section-kicker {color:#a9c1d7!important;}
-[data-testid="stMetric"] {background:#283a50!important;border:1px solid #3e536b!important;box-shadow:0 8px 24px rgba(2,11,22,.13)!important;}
-[data-testid="stMetricLabel"], [data-testid="stMetricLabel"] p {color:#b5c6d8!important;}
-[data-testid="stMetricValue"], [data-testid="stMetricValue"] * {color:#f4f8ff!important;}
-[data-testid="stTabs"] [data-baseweb="tab-list"] {background:#24374c!important;}
-[data-testid="stTabs"] button[data-baseweb="tab"] {color:#bfd0e0!important;}
-[data-testid="stTabs"] button[aria-selected="true"] {background:#38536c!important;color:#fff!important;box-shadow:none!important;}
-[data-testid="stTabs"] button[aria-selected="true"] * {color:#fff!important;}
-[data-testid="stDataFrame"] {background:#1b2837!important;border:1px solid #40546a!important;}
-[data-testid="stExpander"] {background:#26384c!important;border:1px solid #435970!important;}
-[data-testid="stExpander"] summary, [data-testid="stExpander"] summary * {color:#e6edf5!important;}
-[data-testid="stMain"] [data-baseweb="select"] > div,
-[data-testid="stMain"] [data-baseweb="input"] > div,
-[data-testid="stMain"] [data-baseweb="textarea"] > div {background:#26394d!important;border-color:#466078!important;color:#e8f0f8!important;}
-[data-testid="stMain"] [data-baseweb="select"] input,
-[data-testid="stMain"] [data-baseweb="input"] input,
-[data-testid="stMain"] textarea,
-[data-testid="stMain"] [data-baseweb="select"] [role="combobox"] {color:#eef5fc!important;}
-[data-testid="stMain"] [data-baseweb="select"] svg {fill:#c2d3e2!important;}
-[data-testid="stDownloadButton"] button {background:#2d455b!important;color:#edf6ff!important;border-color:#4a6680!important;}
-[data-testid="stDownloadButton"] button:hover {background:#38556d!important;border-color:#62bdb6!important;color:#fff!important;}
-[data-testid="stMain"] [data-testid="stCaptionContainer"] p {color:#b1c3d5!important;}
-[data-testid="stMain"] [data-testid="stWidgetLabel"] p {color:#dbe6f0!important;}
-[data-testid="stMain"] [data-testid="stAlert"] {border:1px solid rgba(131,168,199,.23);}
-[data-testid="stMain"] hr {border-color:#3b5065!important;}
-[data-testid="stMain"] [data-testid="stDataFrame"] *,
-[data-testid="stMain"] [data-testid="stDataFrame"] canvas {color-scheme:dark;}
-/* Keep source identity colors inside the hero intact. */
+/* Sidebar: panel kendali */
+[data-testid="stSidebar"] { border-right:1px solid var(--rim-soft); }
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p { color:var(--frost); font-weight:600; }
+[data-testid="stSidebar"] hr { border-color:var(--rim-soft); margin:1.2rem 0; }
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] { background:var(--deck); border:1px dashed var(--rim); border-radius:14px; }
+.brand { display:flex; align-items:center; gap:12px; margin:.1rem 0 .4rem; }
+.brand-mark { width:30px; height:30px; border-radius:9px; background:var(--spectrum); box-shadow:0 0 22px rgba(139,123,255,.5); flex:none; }
+.brand-name { font-family:'Unbounded',sans-serif; font-weight:700; font-size:15px; color:#fff; line-height:1.1; }
+.brand-sub { font-size:12px; color:var(--haze); margin-top:2px; }
+.step { display:flex; align-items:center; gap:10px; margin:.4rem 0 .7rem; }
+.step-n { width:26px; height:26px; border-radius:50%; border:1.5px solid var(--iris); color:var(--iris); font:600 11px 'Unbounded',sans-serif; display:grid; place-items:center; flex:none; }
+.step-t { font-weight:800; font-size:15px; color:var(--frost); }
 
+/* Hero */
+.hero { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(0,1fr); gap:28px 48px; align-items:end; margin:0 0 30px; }
+.hero h1 { font-family:'Unbounded',sans-serif!important; font-weight:600!important; font-size:clamp(26px,3vw,42px)!important; line-height:1.08!important; letter-spacing:-.03em; color:#fff!important; margin:0!important; padding:0!important; }
+.hero p { color:var(--haze); font-size:14.5px; line-height:1.65; max-width:62ch; margin:0 0 4px; }
+.hero-line { grid-column:1 / -1; height:2px; border-radius:2px; background:var(--spectrum); transform-origin:left; animation:draw 1.1s cubic-bezier(.2,.7,.1,1) both; box-shadow:0 0 18px rgba(139,123,255,.6); }
+@keyframes draw { from { transform:scaleX(0); opacity:.2; } to { transform:scaleX(1); opacity:1; } }
+
+/* Panel spektrum */
+.deck { background:linear-gradient(180deg,var(--deck-2),var(--deck)); border:1px solid var(--rim); border-radius:20px; padding:26px 28px 22px; margin:8px 0 30px; box-shadow:0 24px 60px -30px rgba(5,6,20,.9), inset 0 1px 0 rgba(255,255,255,.04); }
+.deck-head { display:flex; justify-content:space-between; align-items:baseline; gap:16px; flex-wrap:wrap; margin-bottom:22px; }
+.deck-title { font-family:'Unbounded',sans-serif; font-weight:600; font-size:16px; color:var(--frost); }
+.deck-note { font-size:12.5px; color:var(--dim); }
+.stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:0; margin-bottom:24px; }
+.stat { padding:2px 22px; border-left:1px solid var(--rim-soft); }
+.stat:first-child { padding-left:0; border-left:0; }
+.stat b { display:block; font-family:'Unbounded',sans-serif; font-weight:600; font-size:clamp(24px,2.5vw,36px); color:#fff; letter-spacing:-.03em; line-height:1.1; font-variant-numeric:tabular-nums; }
+.stat span { font-size:13px; color:var(--haze); }
+.stat.hot b { color:var(--ion); text-shadow:0 0 24px rgba(92,225,255,.35); }
+.stat.warn b { color:var(--flare); }
+.band { display:flex; height:14px; border-radius:99px; overflow:hidden; background:var(--rim-soft); gap:2px; }
+.band i { display:block; height:100%; min-width:3px; }
+.legend { display:flex; flex-wrap:wrap; gap:8px 22px; margin:14px 0 0; padding:0; list-style:none; }
+.legend li { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--haze); }
+.legend li i { width:10px; height:10px; border-radius:3px; display:inline-block; }
+.legend li b { color:var(--frost); font-variant-numeric:tabular-nums; }
+
+/* Tab sebagai segmented control (selector role-based: aman untuk Streamlit lama & baru) */
+[data-testid="stTabs"] [role="tablist"] { gap:4px; background:var(--deck); border:1px solid var(--rim-soft); border-radius:14px; padding:5px; overflow-x:auto; box-shadow:none; border-bottom:1px solid var(--rim-soft); }
+[data-testid="stTabs"] [role="tab"] { border-radius:10px; min-height:40px; padding:0 16px; white-space:nowrap; color:var(--haze); display:flex; align-items:center; border:0; background:transparent; }
+[data-testid="stTabs"] [role="tab"] p { font-weight:700; font-size:13px; color:inherit; }
+[data-testid="stTabs"] [role="tab"]:hover { color:var(--frost); background:rgba(139,123,255,.08); }
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] { background:linear-gradient(180deg,#3A3480,#2C2A66); color:#fff; box-shadow:inset 0 0 0 1px rgba(139,123,255,.55), 0 0 18px -4px rgba(139,123,255,.6); }
+[data-testid="stTabs"] .react-aria-SelectionIndicator, [data-testid="stTabs"] [role="tablist"]::after { display:none; }
+[data-testid="stTabs"] [data-baseweb="tab-highlight"], [data-testid="stTabs"] [data-baseweb="tab-border"] { display:none; }
+[data-testid="stTabs"] [role="tabpanel"] { padding-top:1.2rem; }
+
+/* Komponen */
+[data-testid="stMetric"] { background:var(--deck); border:1px solid var(--rim-soft); border-radius:16px; padding:16px 20px; }
+[data-testid="stMetricValue"] { font-family:'Unbounded',sans-serif; font-weight:600; color:#fff; }
+[data-testid="stDataFrame"] { border:1px solid var(--rim-soft); border-radius:14px; overflow:hidden; }
+[data-testid="stExpander"] { border:1px solid var(--rim-soft); border-radius:14px; background:var(--deck); }
+[data-testid="stAlert"] { border-radius:12px; }
+.stButton button[kind="primary"] { background:var(--spectrum); border:0; color:#0C0F23; font-weight:800; box-shadow:0 8px 26px -10px rgba(139,123,255,.9); }
+.stButton button[kind="primary"]:hover { filter:brightness(1.08); color:#0C0F23; }
+.stButton button[kind="primary"]:disabled { background:var(--rim-soft); color:var(--dim); box-shadow:none; }
+[data-testid="stDownloadButton"] button { border:1px solid var(--rim); background:var(--deck-2); color:var(--frost); font-weight:700; border-radius:10px; }
+[data-testid="stDownloadButton"] button:hover { border-color:var(--ion); color:#fff; box-shadow:0 0 0 3px rgba(92,225,255,.12); }
+button:focus-visible, [role="tab"]:focus-visible { outline:2px solid var(--ion)!important; outline-offset:2px; }
+
+@media (max-width:900px) {
+  .hero { grid-template-columns:1fr; gap:16px; }
+  .stats { grid-template-columns:repeat(2,minmax(0,1fr)); row-gap:18px; }
+  .stat:nth-child(3) { padding-left:0; border-left:0; }
+  .deck { padding:20px; }
+}
+@media (prefers-reduced-motion:reduce) { .hero-line { animation:none; } }
 </style>
 """,unsafe_allow_html=True)
 
@@ -121,6 +125,34 @@ def rupiah(v):
         if pd.isna(v):return '-'
         n=float(v);return ('-Rp' if n<0 else 'Rp')+f'{abs(n):,.0f}'.replace(',','.')
     except (ValueError,TypeError):return '-'
+
+# --- Tampilan saja: komponen visual tanpa logika bisnis ---
+STATUS_STYLE=[('NAIK','Naik','#5CE1FF'),('TETAP','Tetap','#8B7BFF'),('TURUNKAN','Turunkan','#FFB547'),
+              ('PELUANG KHUSUS - REVIEW','Peluang khusus','#E36BFF'),('REVIEW NONAKTIF','Review nonaktif','#FF6B8B'),('VALIDASI DATA','Validasi data','#5B5F8F')]
+
+def step_header(n,title):
+    st.markdown(f'<div class="step"><span class="step-n">{n}</span><span class="step-t">{html.escape(title)}</span></div>',unsafe_allow_html=True)
+
+def render_deck(master_count,df):
+    total=len(df);counts=df['STATUS'].value_counts()
+    known=[(k,label,color,int(counts.get(k,0))) for k,label,color in STATUS_STYLE]
+    other=total-sum(c for *_,c in known)
+    if other>0:known.append(('LAINNYA','Lainnya','#3A3F70',other))
+    seg=''.join(f'<i style="flex:{c};background:{color}" title="{html.escape(label)}: {c}"></i>' for _,label,color,c in known if c>0)
+    leg=''.join(f'<li><i style="background:{color}"></i>{html.escape(label)} <b>{c:,}</b></li>'.replace(',','.') for _,label,color,c in known if c>0)
+    naik=int(counts.get('NAIK',0));issues=int((df['VALIDASI']!='OK').sum())
+    def fmt(v):return f'{v:,}'.replace(',','.')
+    st.markdown(f'''<section class="deck" aria-label="Ringkasan rekomendasi">
+<div class="deck-head"><div class="deck-title">Spektrum rekomendasi</div><div class="deck-note">Sebaran status untuk {fmt(total)} baris marketplace sesuai filter</div></div>
+<div class="stats">
+<div class="stat"><b>{fmt(master_count)}</b><span>master dipilih</span></div>
+<div class="stat"><b>{fmt(total)}</b><span>baris marketplace</span></div>
+<div class="stat hot"><b>{fmt(naik)}</b><span>kandidat naik</span></div>
+<div class="stat{' warn' if issues else ''}"><b>{fmt(issues)}</b><span>perlu validasi</span></div>
+</div>
+<div class="band" role="img" aria-label="Distribusi status rekomendasi">{seg}</div>
+<ul class="legend">{leg}</ul>
+</section>''',unsafe_allow_html=True)
 
 def prepare_export(df):
     wb=Workbook();info=wb.active;info.title='PANDUAN'
@@ -153,21 +185,18 @@ def prepare_export(df):
         for c in ws[1]:c.fill=PatternFill('solid',fgColor='17365D');c.font=Font(bold=True,color='FFFFFF',name='Calibri',size=10)
     file=BytesIO();wb.save(file);return file.getvalue()
 
-st.markdown('''<div class="dashboard-hero">
-<div class="hero-eyebrow">INPERTEK / INTERNAL ANALYTICS</div>
+st.markdown('''<header class="hero">
 <h1>Affiliate Commission Optimizer</h1>
-<p>Multi-master analysis with margin-first decision intelligence</p>
-<div class="hero-tags"><span class="hero-tag">V5.2 · ELEGANT HYBRID</span><span class="hero-tag">MASTER READ-ONLY</span><span class="hero-tag">KOMISI 1% STEP</span></div>
-</div>''',unsafe_allow_html=True)
-st.info('Satu dashboard untuk banyak master. Hanya sheet hijau dengan mapping terverifikasi yang diproses. Master asli tidak diubah; hasil ekspor adalah bahan review, bukan template impor resmi marketplace.')
+<p>Hitung ulang komisi affiliate per SKU di Shopee dan Tokopedia tanpa menggerus margin. Hanya sheet hijau dengan mapping terverifikasi yang diproses, master asli tidak pernah diubah, dan file ekspor adalah bahan review, bukan template impor marketplace.</p>
+<div class="hero-line"></div>
+</header>''',unsafe_allow_html=True)
 try:db_connect(DB).close()
 except Exception:st.error('Database SQLite tidak dapat dibuka.');st.stop()
 
 with st.sidebar:
-    st.markdown('### ◈ INPERTEK')
-    st.caption('AFFILIATE OPTIMIZER / V5.2')
+    st.markdown('<div class="brand"><div class="brand-mark"></div><div><div class="brand-name">INPERTEK</div><div class="brand-sub">Affiliate Optimizer v5.3</div></div></div>',unsafe_allow_html=True)
     st.divider()
-    st.header('01 / Upload master')
+    step_header(1,'Upload master')
     uploads=st.file_uploader('Pilih satu atau beberapa master (.xlsx)',type=['xlsx'],accept_multiple_files=True,help='Prioritas sheet tab hijau. Tidak boleh upload data sensitif ke GitHub.')
     if st.button('Analisis / sinkronkan master',disabled=not uploads,type='primary',use_container_width=True):
         with tempfile.TemporaryDirectory() as d:
@@ -190,7 +219,7 @@ with st.sidebar:
             except Exception:
                 st.error('Impor gagal. Periksa file XLSX dan pengaturan workbook. Data sebelumnya tetap tersedia.')
     st.divider()
-    st.header('02 / Kebijakan komisi')
+    step_header(2,'Kebijakan komisi')
     st.caption('Default: agresif, tetapi sisa margin tidak boleh minus dan idealnya minimal sebesar komisi baru.')
     mode=st.selectbox('Agresivitas',['AGRESIF','SEIMBANG','KONSERVATIF'],index=0)
     headroom={'AGRESIF':.85,'SEIMBANG':.60,'KONSERVATIF':.35}[mode]
@@ -222,7 +251,7 @@ run_stats=pd.read_sql_query('SELECT r.*,m.source_name AS latest_name FROM runs r
 change=pd.read_sql_query(f'SELECT * FROM changes WHERE run_id IN ({q}) ORDER BY run_id DESC',con,params=ids)
 con.close()
 with st.sidebar:
-    st.header('03 / Filter data')
+    step_header(3,'Filter data')
     market=st.selectbox('Marketplace',['SEMUA','SHOPEE','TOKOPEDIA'])
     sheet_filter=st.selectbox('Worksheet sumber',['SEMUA']+sorted(base.sheet.dropna().unique().tolist()))
     keyword=st.text_input('Cari SKU / nama produk')
@@ -249,15 +278,9 @@ output['DUPLIKAT LINTAS MASTER']=dups
 if dups.any():
     output.loc[dups,'ALASAN']=output.loc[dups,'ALASAN']+' SKU ini muncul beberapa kali pada master/sheet terpilih; kandidat ditahan dari ekspor.'
 
-st.markdown('<div class="section-kicker">Ringkasan performa analisis</div>',unsafe_allow_html=True)
-m1,m2,m3,m4=st.columns(4)
-m1.metric('Master dipilih',len(chosen))
-m2.metric('Baris marketplace',len(output))
-m3.metric('Kandidat naik',int((output.STATUS=='NAIK').sum()))
-m4.metric('Perlu validasi',int((output.VALIDASI!='OK').sum()))
+render_deck(len(chosen),output)
 
-st.markdown('<div class="section-kicker">Workspace analisis</div>',unsafe_allow_html=True)
-tabs=st.tabs(['📈 Analisis Komisi','✅ Kandidat Ekspor','⚠️ Validasi Data','🔄 Perubahan Master','📗 Panduan & Detail SKU','🧩 Mapping & Histori'])
+tabs=st.tabs(['Analisis komisi','Kandidat ekspor','Validasi data','Perubahan master','Detail SKU & panduan','Mapping & histori'])
 with tabs[0]:
     st.caption('Bandingkan tarif komisi awal, tarif usulan, biaya affiliate, serta sisa margin dalam satu tabel. Arahkan kursor ke judul kolom untuk penjelasan.')
     states=st.multiselect('Filter rekomendasi',sorted(output.STATUS.unique().tolist()))
