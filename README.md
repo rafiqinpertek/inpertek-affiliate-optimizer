@@ -1,8 +1,18 @@
-# V5.3 · Desain "Spektrum"
+# V5.3 · Desain "Spektrum" + algoritma "Margin Berjarak Aman"
 
-Tampilan baru: tema gelap indigo dengan aksen spektrum cyan–iris–magenta, font Unbounded + Manrope, panel "Spektrum rekomendasi" yang menampilkan sebaran status, dan tab bergaya segmented control. **Engine dan logika perhitungan tidak berubah dari V5.2.**
+## Algoritma komisi: "Margin Berjarak Aman"
+- Margin master = **margin bersih** (sudah dikurangi komisi affiliate awal). Margin sebelum affiliate = margin master + biaya komisi awal.
+- **Aturan pokok:** setelah komisi baru, sisa margin ≥ k × komisi, dengan k > 1. Komisi tidak pernah melebihi sisa margin dan tidak mepet dengannya.
+  - Agresif k = 1,25 (komisi maks ~44% margin) · Seimbang k = 1,5 (40%) · Konservatif k = 2 (~33%)
+- Tiap produk disesuaikan ke batas komisinya = margin sebelum affiliate ÷ (1 + k), dibulatkan ke bawah ke kelipatan 1%:
+  **NAIK** bila komisi awal di bawah batas, **TURUNKAN** bila di atas, **TETAP** bila sudah pas, **NONAKTIF** bila 1% pun tidak muat.
+- Opsi tambahan: margin minimum Rupiah, batas komisi, batas kenaikan per evaluasi.
+- Uji: `python test_v53.py` (contoh kasus + 60.000 kasus acak).
 
-File yang diganti/ditambah: `app.py` dan `.streamlit/config.toml` (tema warna & font). Keduanya wajib di-upload agar tampilan sesuai.
+## Desain
+Tema gelap indigo dengan aksen spektrum cyan–iris–magenta, font Unbounded + Manrope, panel "Spektrum rekomendasi", tab segmented control.
+
+File yang diganti/ditambah: `app.py`, `engine.py`, `README.md`, `test_v53.py`, dan `.streamlit/config.toml` (tema warna & font, wajib di-upload).
 
 # V5.2 · Elegant Hybrid UI Refresh
 

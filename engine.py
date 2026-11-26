@@ -139,53 +139,70 @@ def validate(rec):
     if not errs and abs(rec['price']*rec['old_pct']/100-rec['old_fee'])>max(3,rec['old_fee']*0.002):errs.append('BIAYA_KOMISI_TIDAK_COCOK')
     return 'OK' if not errs else '; '.join(errs)
 
-def analyze(rec, retained_share=.30, min_profit=0, max_pct=30, target_pct=30, headroom=.85, step=1.0, max_increase=None, opportunity_mode=False, opportunity_ratio=.75):
+# ---------------------------------------------------------------------------
+# V5.3 · Algoritma "Margin Berjarak Aman"
+# Margin master = margin bersih (sudah dikurangi komisi affiliate awal).
+#   Margin sebelum affiliate (M) = margin master + biaya komisi awal.
+# Aturan pokok: setelah komisi baru (C), SISA MARGIN >= k x KOMISI, dengan k > 1,
+#   sehingga komisi tidak pernah melebihi sisa margin dan tidak mepet dengannya.
+#   M - C >= k*C  ->  C <= M / (1+k)   (batas komisi per produk)
+# Mode menentukan jarak aman k:
+#   Agresif     k=1.25 (sisa margin >= 1,25x komisi; komisi maks ~44% margin)
+#   Seimbang    k=1.50 (sisa margin >= 1,5x komisi;  komisi maks 40% margin)
+#   Konservatif k=2.00 (sisa margin >= 2x komisi;    komisi maks ~33% margin)
+# Setiap produk disesuaikan ke batas komisinya (dibulatkan ke bawah, kelipatan 1%):
+#   NAIK bila komisi awal di bawah batas, TURUNKAN bila di atas batas,
+#   TETAP bila sudah tepat, NONAKTIF bila komisi 1% pun tidak memenuhi jarak aman.
+# ---------------------------------------------------------------------------
+MODES={'AGRESIF':1.25,'SEIMBANG':1.50,'KONSERVATIF':2.00}
+
+def _rp(v):
+    return 'Rp '+f'{v:,.0f}'.replace(',','.')
+
+def analyze(rec, mode='AGRESIF', min_profit=0, max_pct=30, target_pct=30, step=1.0, max_increase=None):
     if step != 1.0: raise ValueError('Kelipatan wajib 1 poin persentase')
-    out={'status':'VALIDASI DATA','proposed_pct':None,'proposed_fee':None,'margin_before':None,'margin_new':None,'safe_cap':None,'reason':'','balance':None,'auto_eligible':False}
+    if mode not in MODES: raise ValueError('Mode tidak dikenal')
+    k=MODES[mode]
+    out={'status':'VALIDASI DATA','proposed_pct':None,'proposed_fee':None,'margin_before':None,'margin_new':None,'safe_cap':None,
+         'hard_cap':None,'affiliate_share':None,'reason':'','balance':None,'auto_eligible':False}
     if rec['validation']!='OK':out['reason']=rec['validation'];return out
     if max_increase is not None and (not math.isfinite(float(max_increase)) or max_increase < 0):raise ValueError('Batas kenaikan tidak valid')
     price=float(rec['price']);old=float(rec['old_pct']);fee=float(rec['old_fee']);after=float(rec['old_margin'])
     before=after+fee;out['margin_before']=before
     if before<=0:
-        out.update(status='REVIEW NONAKTIF',reason='Tidak ada kapasitas margin sebelum affiliate; jangan otomatis memperbarui marketplace.')
+        out.update(status='REVIEW NONAKTIF',reason='Margin bersih + komisi awal tidak positif; tidak ada ruang untuk komisi affiliate.')
         return out
-    retained=max(float(min_profit),before*retained_share,0.0)
-    safe_cap=max(0,min(max_pct,target_pct,before*100/(2*price),(before-retained)*100/price))
-    out['safe_cap']=safe_cap
-    cap=math.floor((safe_cap+1e-10)/step)*step
-    # Old commission is retained if within constraints, even when not multiple of chosen step.
-    if old>safe_cap+1e-8:
-        new=cap
-        if new<=0:
-            out.update(status='REVIEW NONAKTIF',reason='Komisi tidak dapat dipertahankan menurut batas margin; nonaktif membutuhkan keputusan manual.')
-            return out
-        status='TURUNKAN';reason='Komisi awal melebihi batas margin yang aman.'
+    min_profit=max(float(min_profit),0.0);limit=min(float(max_pct),float(target_pct))
+    if before<min_profit:
+        out.update(status='REVIEW NONAKTIF',reason=f'Margin sebelum affiliate {_rp(before)} sudah di bawah margin minimum {_rp(min_profit)}; tidak ada ruang untuk komisi.')
+        return out
+    margin_cap=before/(1+k)*100/price
+    cap=max(0.0,min(limit,margin_cap,(before-min_profit)*100/price))
+    out.update(safe_cap=cap,hard_cap=cap)
+    cap_i=math.floor(cap+1e-9);eps=1e-8
+    if cap_i<1:
+        out.update(status='REVIEW NONAKTIF',reason=f'Margin sebelum affiliate {_rp(before)} terlalu tipis: komisi 1% pun membuat sisa margin kurang dari {k:g}x komisi.')
+        return out
+    if old>cap+eps:
+        new=cap_i
+        why='melewati batas komisi yang diatur' if limit<min(margin_cap,(before-min_profit)*100/price) else f'membuat sisa margin kurang dari {k:g}x komisi'
+        reason=f'Komisi awal {old:g}% {why}; disesuaikan turun ke {new}%.'
+    elif cap_i>old+eps:
+        new=cap_i
+        if max_increase is not None:new=max(min(new,math.floor(old+float(max_increase)+1e-9)),math.ceil(old-eps))
+        reason=f'Margin masih longgar; komisi disesuaikan naik ke {new}%.'
+        if new<cap_i:reason+=f' Dibatasi kenaikan per evaluasi (batas margin {cap_i}%).'
     else:
-        new=math.floor((old+(max(0,cap-old)*headroom)+1e-10)/step)*step
-        if max_increase is not None:new=min(new,math.floor((old+max_increase+1e-10)/step)*step)
-        # Original fractional rates may remain only when no change is proposed; export only whole-number proposals.
-        if new<old:
-            new=math.ceil(old) if math.ceil(old)<=cap and (max_increase is None or math.ceil(old)<=old+max_increase+1e-9) else math.floor(old)
-        new=min(new,cap)
-        if old!=int(old) and new==old:new=math.floor(old)
-        new=max(0,new)
-        status='NAIK' if new>old+1e-8 else ('TURUNKAN' if new<old-1e-8 else 'TETAP')
-        reason='Kenaikan dihitung otomatis dari kapasitas margin produk.' if status=='NAIK' else 'Kenaikan belum memenuhi kelipatan atau batas margin.'
+        new=old
+        reason='Komisi awal sudah pas dengan margin produk; tidak perlu diubah.'
     cost=price*new/100;remain=before-cost
-    if remain < -0.01 or remain+0.01<cost or remain+0.01<retained:
+    if remain<-0.01 or remain+0.01<k*cost or remain+0.01<min_profit:
         out.update(status='VALIDASI DATA',reason='Pemeriksaan akhir perlindungan margin gagal');return out
-    out.update(status=status,proposed_pct=round(new,4),proposed_fee=cost,margin_new=remain,balance=remain-cost,reason=reason,auto_eligible=status in ('NAIK','TURUNKAN'))
-    # Special scenario mirrors V3: never auto-approved, never a negative margin.
-    if opportunity_mode and status in ('NAIK','TETAP') and before > 0:
-        special_limit=min(max_pct,target_pct,(before-retained)*100/price)
-        if max_increase is not None:special_limit=min(special_limit,old+max_increase)
-        special=math.floor(special_limit+1e-10)
-        special_fee=price*special/100;special_remain=before-special_fee
-        if (special>new and special_remain>=-0.01 and special_remain+0.01>=retained
-            and special_remain+0.01 < special_fee and special_remain+0.01>=opportunity_ratio*special_fee):
-            out.update(status='PELUANG KHUSUS - REVIEW',proposed_pct=float(special),proposed_fee=special_fee,
-                       margin_new=special_remain,balance=special_remain-special_fee,auto_eligible=False,
-                       reason='Pengecualian: margin positif tetapi lebih kecil daripada biaya affiliate baru. Review manual wajib; jangan ekspor sebagai kandidat otomatis.')
+    status='NAIK' if new>old+eps else ('TURUNKAN' if new<old-eps else 'TETAP')
+    if status!='TETAP' or old>0:
+        reason+=f' Sisa margin {_rp(remain)} = {remain/cost:.2f}x komisi {_rp(cost)}.' if cost>0 else ''
+    out.update(status=status,proposed_pct=round(new,4),proposed_fee=cost,margin_new=remain,balance=remain-cost,
+               affiliate_share=cost/before,reason=reason,auto_eligible=status in ('NAIK','TURUNKAN'))
     return out
 
 def sync_many(paths, db_path, overrides=None):

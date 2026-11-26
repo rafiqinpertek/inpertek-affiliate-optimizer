@@ -6,7 +6,7 @@ import streamlit as st
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
-from engine import db_connect, sync_many, analyze
+from engine import db_connect, sync_many, analyze, MODES
 
 st.set_page_config(page_title='INPERTEK | Affiliate Optimizer V5.3',page_icon='📈',layout='wide')
 
@@ -114,7 +114,7 @@ GUIDE={
 'HARGA JUAL (RP)':'Harga jual pada blok marketplace.', 'HPP (RP)':'Harga pokok dari master.',
 'KOMISI AWAL (%)':'Tarif affiliate saat snapshot master dibaca.', 'BIAYA AFF AWAL (RP)':'Biaya affiliate yang sudah tercermin pada margin master.',
 'MARGIN MASTER (RP)':'Margin setelah biaya affiliate lama menurut master.', 'MARGIN SEBELUM AFF (RP)':'Margin master + biaya affiliate lama. Biaya affiliate hanya ditambahkan kembali sekali.',
-'BATAS AMAN (%)':'Batas maksimum komisi simulasi dari aturan perlindungan margin.', 'KOMISI USULAN (%)':'Persentase baru yang direkomendasikan.',
+'BATAS KOMISI (%)':'Komisi tertinggi yang membuat sisa margin tetap ≥ jarak aman × komisi (1,25x / 1,5x / 2x sesuai mode). Usulan = batas ini dibulatkan ke bawah.', 'PORSI AFFILIATE DARI MARGIN (%)':'Bagian margin sebelum affiliate yang dibayarkan ke affiliate dengan komisi usulan.', 'KOMISI USULAN (%)':'Persentase baru yang direkomendasikan.',
 'BIAYA KOMISI USULAN (RP)':'Harga jual dikali persentase baru (asumsi basis = harga jual).',
 'SISA MARGIN USULAN (RP)':'Margin sebelum affiliate dikurangi biaya komisi baru.', 'SELISIH MARGIN - KOMISI (RP)':'Sisa margin dikurangi biaya komisi baru.',
 'PERUBAHAN KOMISI (POIN %)':'Selisih tarif usulan dengan tarif awal, dalam poin persentase.','RASIO MARGIN / KOMISI':'Rasio sisa margin terhadap biaya affiliate usulan; untuk standar minimal 1.','STATUS':'Naik/turun/tetap/nonaktif/validasi/peluang khusus sesuai perhitungan.', 'VALIDASI':'OK berarti data lolos pemeriksaan dasar, bukan verifikasi batas resmi marketplace.',
@@ -220,10 +220,10 @@ with st.sidebar:
                 st.error('Impor gagal. Periksa file XLSX dan pengaturan workbook. Data sebelumnya tetap tersedia.')
     st.divider()
     step_header(2,'Kebijakan komisi')
-    st.caption('Default: agresif, tetapi sisa margin tidak boleh minus dan idealnya minimal sebesar komisi baru.')
-    mode=st.selectbox('Agresivitas',['AGRESIF','SEIMBANG','KONSERVATIF'],index=0)
-    headroom={'AGRESIF':.85,'SEIMBANG':.60,'KONSERVATIF':.35}[mode]
-    retain=st.slider('Minimum margin sebelum affiliate yang dipertahankan (%)',0,95,30,5)/100
+    st.caption('Aturan pokok: setelah komisi baru, sisa margin selalu lebih besar dari komisi dengan jarak aman. Margin master dibaca sebagai margin bersih (sudah dikurangi komisi awal).')
+    mode=st.selectbox('Agresivitas',['AGRESIF','SEIMBANG','KONSERVATIF'],index=0,help='Jarak aman sisa margin terhadap komisi. Agresif: sisa margin ≥ 1,25x komisi. Seimbang: ≥ 1,5x. Konservatif: ≥ 2x. Komisi tiap produk disesuaikan naik/turun ke batas ini.')
+    ratio=MODES[mode]
+    st.caption(f'Sisa margin minimal {ratio:g}x komisi, jadi komisi paling besar {1/(1+ratio):.0%} dari margin sebelum affiliate.')
     min_profit=st.number_input('Margin minimum (Rp)',min_value=0.0,value=0.0,step=1000.0)
     cap=st.number_input('Batas komisi simulasi (%)',min_value=.5,max_value=100.0,value=30.0,step=.5)
     target=st.number_input('Target maksimum komisi (%)',min_value=.5,max_value=100.0,value=30.0,step=.5)
@@ -231,8 +231,6 @@ with st.sidebar:
     step=1.0
     limit_raise=st.toggle('Batasi kenaikan per evaluasi (opsional)',value=False)
     max_raise=st.number_input('Batas kenaikan (poin persentase)',min_value=1,max_value=100,value=5,step=1,disabled=not limit_raise) if limit_raise else None
-    opportunity=st.toggle('Tampilkan skenario peluang khusus (review manual)',value=False,help='Margin boleh lebih kecil daripada biaya komisi, tetapi tidak negatif, dan dikecualikan dari kandidat ekspor otomatis.')
-    opportunity_ratio=st.slider('Minimal rasio margin / komisi untuk peluang khusus',0.50,0.99,0.75,0.01,disabled=not opportunity)
     st.caption('Batas dan kelipatan adalah ASUMSI simulasi. Periksa aturan resmi dan dasar pengenaan komisi tiap marketplace sebelum upload.')
 
 con=db_connect(DB)
@@ -266,11 +264,11 @@ if base.empty:st.info('Tidak ada produk sesuai filter.');st.stop()
 # Analyze in the view, independent of master. Cross-master duplicates are never eligible for export.
 rows=[]
 for r in base.to_dict('records'):
-    result=analyze(r,retained_share=retain,min_profit=min_profit,max_pct=cap,target_pct=target,headroom=headroom,step=step,max_increase=max_raise,opportunity_mode=opportunity,opportunity_ratio=opportunity_ratio)
+    result=analyze(r,mode=mode,min_profit=min_profit,max_pct=cap,target_pct=target,step=step,max_increase=max_raise)
     rows.append({'MASTER':r['master_name'],'SHEET':r['sheet'],'BARIS':r['source_row'],'MARKETPLACE':r['marketplace'],'SKU':r['sku'],'NAMA PRODUK':r['name'],
                  'HARGA JUAL (RP)':r['price'],'HPP (RP)':r['hpp'],'KOMISI AWAL (%)':r['old_pct'],'BIAYA AFF AWAL (RP)':r['old_fee'],'MARGIN MASTER (RP)':r['old_margin'],
-                 'MARGIN SEBELUM AFF (RP)':result['margin_before'],'BATAS AMAN (%)':result['safe_cap'],'KOMISI USULAN (%)':result['proposed_pct'],
-                 'PERUBAHAN KOMISI (POIN %)':(result['proposed_pct']-r['old_pct'] if result['proposed_pct'] is not None and r['old_pct'] is not None else None),'BIAYA KOMISI USULAN (RP)':result['proposed_fee'],'SISA MARGIN USULAN (RP)':result['margin_new'],'SELISIH MARGIN - KOMISI (RP)':result['balance'],
+                 'MARGIN SEBELUM AFF (RP)':result['margin_before'],'BATAS KOMISI (%)':result['hard_cap'],'KOMISI USULAN (%)':result['proposed_pct'],
+                 'PERUBAHAN KOMISI (POIN %)':(result['proposed_pct']-r['old_pct'] if result['proposed_pct'] is not None and r['old_pct'] is not None else None),'BIAYA KOMISI USULAN (RP)':result['proposed_fee'],'SISA MARGIN USULAN (RP)':result['margin_new'],'SELISIH MARGIN - KOMISI (RP)':result['balance'],'PORSI AFFILIATE DARI MARGIN (%)':(result['affiliate_share']*100 if result['affiliate_share'] is not None else None),
                  'RASIO MARGIN / KOMISI':(result['margin_new']/result['proposed_fee'] if result['proposed_fee'] and result['margin_new'] is not None else None),'STATUS':result['status'],'VALIDASI':r['validation'],'ALASAN':result['reason']})
 output=pd.DataFrame(rows)
 dups=output.duplicated(subset=['MARKETPLACE','SKU'],keep=False)
@@ -338,15 +336,18 @@ with tabs[4]:
                 st.write('**2. Biaya komisi baru:**',rupiah(r['HARGA JUAL (RP)']),f" × {r['KOMISI USULAN (%)']:.0f}% = ",rupiah(r['BIAYA KOMISI USULAN (RP)']))
                 st.write('**3. Margin baru:**',rupiah(r['MARGIN SEBELUM AFF (RP)']),' − ',rupiah(r['BIAYA KOMISI USULAN (RP)']),' = ',rupiah(r['SISA MARGIN USULAN (RP)']))
                 if r['STATUS']=='PELUANG KHUSUS - REVIEW':st.warning('Peluang khusus: margin positif tetapi lebih kecil daripada biaya komisi. Tidak masuk kandidat otomatis.')
-                elif r['SELISIH MARGIN - KOMISI (RP)']>=-0.01:st.success('Sisa margin minimal sebesar biaya komisi baru.')
+                elif r['SELISIH MARGIN - KOMISI (RP)']>=-0.01 and pd.notna(r['RASIO MARGIN / KOMISI']):
+                    st.success(f"Sisa margin {r['RASIO MARGIN / KOMISI']:.2f}x biaya komisi baru. Affiliate menerima {r['PORSI AFFILIATE DARI MARGIN (%)']:.0f}% dari margin sebelum affiliate.")
     st.divider()
     st.subheader('Kamus kolom')
     st.dataframe(pd.DataFrame([{'KOLOM':k,'ARTI / CARA MEMBACA':v} for k,v in GUIDE.items()]),hide_index=True,use_container_width=True)
-    st.markdown('**Status:** NAIK = kapasitas margin mendukung kenaikan; TURUNKAN = komisi awal terlalu besar; TETAP = belum perlu berubah; REVIEW NONAKTIF = kapasitas margin belum cukup; VALIDASI DATA = sumber belum aman dihitung; PELUANG KHUSUS - REVIEW = hanya simulasi manual.')
+    st.markdown('**Status:** NAIK = kapasitas margin mendukung kenaikan; TURUNKAN = komisi awal terlalu besar; TETAP = komisi awal sudah pas dengan margin; REVIEW NONAKTIF = kapasitas margin belum cukup; VALIDASI DATA = sumber belum aman dihitung; PELUANG KHUSUS - REVIEW = hanya simulasi manual.')
     st.latex(r'M_{sebelum}=M_{master}+C_{awal}')
     st.latex(r'C_{baru}=Harga\ Jual\times\frac{Persentase\ Komisi}{100}')
     st.latex(r'M_{baru}=M_{sebelum}-C_{baru}')
-    st.latex(r'M_{baru}\geq C_{baru}\quad(standar)')
+    st.latex(r'M_{baru}\geq k\cdot C_{baru}\iff C_{baru}\leq\frac{M_{sebelum}}{1+k}')
+    st.latex(r'k=1{,}25\ (agresif),\quad 1{,}5\ (seimbang),\quad 2\ (konservatif)')
+    st.caption('Setiap produk disesuaikan ke batas komisinya (kelipatan 1%, dibulatkan ke bawah): naik bila di bawah, turun bila di atas, tetap bila sudah pas, nonaktif bila 1% pun tidak muat.')
     st.caption('Tarif komisi rekomendasi selalu kelipatan 1%. Basis komisi diasumsikan harga jual dan wajib diperiksa terhadap ketentuan marketplace aktual.')
 with tabs[5]:
     st.subheader('Mapping per master dan sheet')
