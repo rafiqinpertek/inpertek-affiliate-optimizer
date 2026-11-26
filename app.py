@@ -1,12 +1,13 @@
 """INPERTEK multi-master read-only commission optimizer. No Supabase required."""
 import html, os, tempfile
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
-from engine import db_connect, sync_many, analyze, MODES
+from engine import db_connect, sync_many, analyze, MODES, is_postgres, storage_label
 
 st.set_page_config(page_title='INPERTEK | Affiliate Optimizer V5.3',page_icon='📈',layout='wide')
 
@@ -43,6 +44,12 @@ html, body, [data-testid="stApp"] { font-family:'Manrope',sans-serif; }
 .brand-mark { width:30px; height:30px; border-radius:9px; background:var(--spectrum); box-shadow:0 0 22px rgba(139,123,255,.5); flex:none; }
 .brand-name { font-family:'Unbounded',sans-serif; font-weight:700; font-size:15px; color:#fff; line-height:1.1; }
 .brand-sub { font-size:12px; color:var(--haze); margin-top:2px; }
+.store { display:flex; align-items:center; gap:8px; font-size:12px; font-weight:600; padding:6px 10px; border-radius:99px; margin:.2rem 0 0; width:fit-content; }
+.store i { width:7px; height:7px; border-radius:50%; display:inline-block; }
+.store.ok { color:#7CF2C4; background:rgba(124,242,196,.10); border:1px solid rgba(124,242,196,.30); }
+.store.ok i { background:#7CF2C4; box-shadow:0 0 8px #7CF2C4; }
+.store.temp { color:#FFB547; background:rgba(255,181,71,.10); border:1px solid rgba(255,181,71,.30); }
+.store.temp i { background:#FFB547; }
 .step { display:flex; align-items:center; gap:10px; margin:.4rem 0 .7rem; }
 .step-n { width:26px; height:26px; border-radius:50%; border:1.5px solid var(--iris); color:var(--iris); font:600 11px 'Unbounded',sans-serif; display:grid; place-items:center; flex:none; }
 .step-t { font-weight:800; font-size:15px; color:var(--frost); }
@@ -106,7 +113,39 @@ button:focus-visible, [role="tab"]:focus-visible { outline:2px solid var(--ion)!
 </style>
 """,unsafe_allow_html=True)
 
-DB=os.path.join(os.path.dirname(__file__),'optimizer_v5.sqlite')
+def resolve_db():
+    """DATABASE_URL (Streamlit Secrets / env) -> Postgres permanen; jika kosong -> SQLite sementara."""
+    url=None
+    try:url=st.secrets.get('DATABASE_URL')
+    except Exception:url=None
+    url=url or os.environ.get('DATABASE_URL')
+    return url.strip() if url else os.path.join(os.path.dirname(__file__),'optimizer_v5.sqlite')
+DB=resolve_db();PERSISTENT=is_postgres(DB)
+WIB=timezone(timedelta(hours=7))
+
+def wib(ts):
+    try:return datetime.fromisoformat(str(ts)).astimezone(WIB).strftime('%d %b %Y, %H:%M WIB')
+    except Exception:return str(ts)
+
+# Snapshot (run) tidak pernah berubah setelah disimpan, jadi aman di-cache berdasarkan run_id.
+@st.cache_data(show_spinner=False,max_entries=16)
+def load_items(db,ids):
+    con=db_connect(db)
+    try:
+        q=','.join('?' for _ in ids)
+        return con.query_df(f'SELECT i.*, m.source_name AS master_name FROM items i JOIN masters m ON m.master_id=i.master_id WHERE i.run_id IN ({q})',list(ids))
+    finally:con.close()
+
+@st.cache_data(show_spinner=False,max_entries=16)
+def load_history(db,master_ids,latest_run):
+    con=db_connect(db)
+    try:
+        q=','.join('?' for _ in master_ids)
+        runs=con.query_df(f'SELECT r.*, m.source_name AS master_name FROM runs r JOIN masters m ON m.master_id=r.master_id WHERE r.master_id IN ({q}) ORDER BY r.run_id DESC',list(master_ids))
+        changes=con.query_df(f'SELECT * FROM changes WHERE master_id IN ({q}) ORDER BY run_id DESC',list(master_ids))
+        return runs,changes
+    finally:con.close()
+
 MONEY=['HARGA JUAL (RP)','HPP (RP)','BIAYA AFF AWAL (RP)','MARGIN MASTER (RP)','MARGIN SEBELUM AFF (RP)','BIAYA KOMISI USULAN (RP)','SISA MARGIN USULAN (RP)','SELISIH MARGIN - KOMISI (RP)']
 GUIDE={
 'MASTER':'File master yang menjadi asal produk.','SHEET':'Worksheet hijau tempat data berasal.','BARIS':'Nomor baris pada worksheet asli.',
@@ -191,10 +230,15 @@ st.markdown('''<header class="hero">
 <div class="hero-line"></div>
 </header>''',unsafe_allow_html=True)
 try:db_connect(DB).close()
-except Exception:st.error('Database SQLite tidak dapat dibuka.');st.stop()
+except Exception:
+    if PERSISTENT:st.error('Tidak bisa terhubung ke database permanen. Periksa DATABASE_URL di Settings → Secrets Streamlit, lalu reboot app. Data lama tetap aman di Neon.')
+    else:st.error('Database sementara tidak dapat dibuka.')
+    st.stop()
 
 with st.sidebar:
     st.markdown('<div class="brand"><div class="brand-mark"></div><div><div class="brand-name">INPERTEK</div><div class="brand-sub">Affiliate Optimizer v5.3</div></div></div>',unsafe_allow_html=True)
+    if PERSISTENT:st.markdown('<div class="store ok"><i></i>Riwayat tersimpan permanen</div>',unsafe_allow_html=True)
+    else:st.markdown('<div class="store temp"><i></i>Riwayat sementara: hilang saat app restart</div>',unsafe_allow_html=True)
     st.divider()
     step_header(1,'Upload master')
     uploads=st.file_uploader('Pilih satu atau beberapa master (.xlsx)',type=['xlsx'],accept_multiple_files=True,help='Prioritas sheet tab hijau. Tidak boleh upload data sensitif ke GitHub.')
@@ -210,6 +254,7 @@ with st.sidebar:
             try:
                 with st.spinner('Memeriksa worksheet, mapping, nominal affiliate, dan snapshot...'):
                     results=sync_many(paths,DB)
+                load_history.clear()
                 for r in results:
                     if r['status']=='IMPORTED':
                         st.success(f"{r['file']}: {r['validated_sheets']}/{r['green_sheets']} sheet terverifikasi; {r['records']} baris marketplace; {r['issues']} catatan validasi")
@@ -234,7 +279,7 @@ with st.sidebar:
     st.caption('Batas dan kelipatan adalah ASUMSI simulasi. Periksa aturan resmi dan dasar pengenaan komisi tiap marketplace sebelum upload.')
 
 con=db_connect(DB)
-masters=pd.read_sql_query('SELECT master_id,source_name,last_run,updated_at FROM masters ORDER BY source_name',con)
+masters=con.query_df('SELECT master_id,source_name,last_run,updated_at FROM masters ORDER BY source_name')
 if masters.empty:
     st.warning('Belum ada snapshot. Upload master Excel melalui sidebar lalu klik Analisis / sinkronkan master.')
     con.close();st.stop()
@@ -242,12 +287,11 @@ selected=st.multiselect('Pilih master untuk analisis',masters.source_name.tolist
 chosen=masters[masters.source_name.isin(selected)]
 if chosen.empty:st.warning('Pilih minimal satu master.');con.close();st.stop()
 ids=chosen.last_run.astype(int).tolist()
-q=','.join('?' for _ in ids)
-base=pd.read_sql_query(f'SELECT i.*, m.source_name AS master_name FROM items i JOIN masters m ON m.master_id=i.master_id WHERE i.run_id IN ({q})',con,params=ids)
-mapping=pd.read_sql_query('SELECT sm.master_id, m.source_name, sm.sheet, sm.status, sm.reason, sm.map_json FROM sheet_maps sm JOIN masters m ON m.master_id=sm.master_id',con)
-run_stats=pd.read_sql_query('SELECT r.*,m.source_name AS latest_name FROM runs r JOIN masters m ON m.last_run=r.run_id',con)
-change=pd.read_sql_query(f'SELECT * FROM changes WHERE run_id IN ({q}) ORDER BY run_id DESC',con,params=ids)
+mapping=con.query_df('SELECT sm.master_id, m.source_name, sm.sheet, sm.status, sm.reason, sm.map_json FROM sheet_maps sm JOIN masters m ON m.master_id=sm.master_id')
 con.close()
+with st.spinner('Memuat snapshot master...'):
+    base=load_items(DB,tuple(sorted(ids)))
+    runs_all,change=load_history(DB,tuple(sorted(chosen.master_id)),int(max(ids)))
 with st.sidebar:
     step_header(3,'Filter data')
     market=st.selectbox('Marketplace',['SEMUA','SHOPEE','TOKOPEDIA'])
@@ -308,14 +352,37 @@ with tabs[2]:
         st.download_button('Download validasi (CSV)',problems.to_csv(index=False).encode('utf-8-sig'),'INPERTEK_VALIDASI_V52.csv','text/csv')
     else:st.success('Tidak ada masalah pada data yang sedang dipilih.')
 with tabs[3]:
-    st.subheader('Perubahan antar-snapshot MASTER YANG SAMA')
-    st.caption('Upload hanya satu master terbaru: perbandingan hanya pada master tersebut. Master lain tidak ikut ditimpa.')
-    if change.empty:st.info('Belum ada perubahan yang tercatat pada master yang dipilih.')
+    st.subheader('Riwayat perubahan master')
+    st.caption('Setiap upload master dibandingkan dengan upload sebelumnya dari master yang sama. Riwayat ini '+('tersimpan permanen.' if PERSISTENT else 'masih sementara: hilang saat app restart. Hubungkan Neon agar permanen.'))
+    FIELD={'price':'Harga jual','hpp':'HPP','old_pct':'Komisi (%)','old_fee':'Biaya affiliate','old_margin':'Margin bersih','ROW':'Produk'}
+    KIND={'MODIFIED':'Berubah','ADDED':'SKU baru','REMOVED':'SKU hilang'}
+    def fmt_val(field,v):
+        if field=='ROW':return '-'
+        try:x=float(v)
+        except (TypeError,ValueError):return '-' if v in (None,'None') else str(v)
+        return f'{x:.2f}%'.replace('.',',') if field=='old_pct' else rupiah(x)
+    uploads_with_change=runs_all[runs_all.run_id.isin(change.run_id.unique())] if not change.empty else runs_all.iloc[0:0]
+    if change.empty:
+        st.info('Belum ada perubahan. Riwayat muncul setelah master yang sama di-upload lagi dengan isi berbeda.')
     else:
-        cshow=change.copy()
-        cshow['MASTER']=cshow['master_id'].map(dict(zip(masters.master_id,masters.source_name)))
-        st.dataframe(cshow[['MASTER','sheet','marketplace','sku','field','old_value','new_value','kind','run_id']],hide_index=True,use_container_width=True)
-        st.download_button('Download riwayat perubahan (CSV)',change.to_csv(index=False).encode('utf-8-sig'),'INPERTEK_PERUBAHAN_V52.csv','text/csv')
+        opts=['Semua upload']+[f"{r.master_name}  |  {wib(r.sync_time)}" for r in uploads_with_change.itertuples()]
+        run_by_label={f"{r.master_name}  |  {wib(r.sync_time)}":r.run_id for r in uploads_with_change.itertuples()}
+        pick=st.selectbox('Upload',opts,index=1 if len(opts)>1 else 0,help='Pilih satu upload untuk melihat apa saja yang berubah dibanding upload sebelumnya.')
+        cv=change if pick=='Semua upload' else change[change.run_id==run_by_label[pick]]
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric('Komisi berubah',int((cv.field=='old_pct').sum()))
+        c2.metric('Harga berubah',int((cv.field=='price').sum()))
+        c3.metric('SKU baru',int((cv.kind=='ADDED').sum()))
+        c4.metric('SKU hilang',int((cv.kind=='REMOVED').sum()))
+        kinds=st.multiselect('Jenis data',[FIELD[k] for k in FIELD if k in set(cv.field)],help='Kosongkan untuk menampilkan semua.')
+        times=dict(zip(runs_all.run_id,runs_all.sync_time))
+        names=dict(zip(masters.master_id,masters.source_name))
+        view=pd.DataFrame({'MASTER':cv.master_id.map(names),'WAKTU UPLOAD':cv.run_id.map(times).map(wib),'SHEET':cv.sheet,'MARKETPLACE':cv.marketplace,'SKU':cv.sku,
+                           'DATA':cv.field.map(FIELD).fillna(cv.field),'NILAI LAMA':[fmt_val(f,v) for f,v in zip(cv.field,cv.old_value)],
+                           'NILAI BARU':[fmt_val(f,v) for f,v in zip(cv.field,cv.new_value)],'JENIS':cv.kind.map(KIND).fillna(cv.kind)})
+        if kinds:view=view[view.DATA.isin(kinds)]
+        st.dataframe(view,hide_index=True,use_container_width=True,height=420)
+        st.download_button('Download riwayat perubahan (CSV)',view.to_csv(index=False).encode('utf-8-sig'),'INPERTEK_PERUBAHAN_V53.csv','text/csv')
 with tabs[4]:
     st.subheader('Detail perhitungan untuk satu SKU')
     st.caption('Buka satu produk untuk melihat sumber data, alasan, dan alur hitung usulan komisi secara transparan.')
@@ -355,6 +422,8 @@ with tabs[5]:
     st.dataframe(mapp[['source_name','sheet','status','reason','map_json']],hide_index=True,use_container_width=True)
     st.subheader('Snapshot terakhir per master')
     st.dataframe(masters[masters.source_name.isin(selected)],hide_index=True,use_container_width=True)
-    st.subheader('Riwayat sinkronisasi yang masih tersimpan')
-    st.dataframe(run_stats[run_stats.source_name.isin(selected)] if 'source_name' in run_stats.columns else run_stats,hide_index=True,use_container_width=True)
-    st.caption('SQLite pada Streamlit Cloud bersifat sementara. Unduh Excel/CSV untuk menyimpan hasil penting.')
+    st.subheader('Semua upload tersimpan')
+    hist=runs_all.assign(WAKTU=runs_all.sync_time.map(wib))[['master_name','WAKTU','sheet_count','source_rows','records','issues','run_id']]
+    hist.columns=['MASTER','WAKTU UPLOAD','SHEET','BARIS SUMBER','BARIS MARKETPLACE','CATATAN VALIDASI','ID SNAPSHOT']
+    st.dataframe(hist,hide_index=True,use_container_width=True)
+    st.caption(f'Penyimpanan: {storage_label(DB)}. '+('Riwayat tidak hilang saat app restart atau server berhenti.' if PERSISTENT else 'Riwayat hilang saat app restart. Isi DATABASE_URL di Secrets agar permanen.'))

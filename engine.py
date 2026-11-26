@@ -20,11 +20,78 @@ CREATE INDEX IF NOT EXISTS idx_items_master ON items(master_id,run_id);
 CREATE INDEX IF NOT EXISTS idx_items_sku ON items(marketplace,sku);
 CREATE TABLE IF NOT EXISTS sheet_maps(master_id TEXT,sheet TEXT,map_json TEXT,status TEXT,reason TEXT,updated_at TEXT,PRIMARY KEY(master_id,sheet));
 CREATE TABLE IF NOT EXISTS changes(run_id INTEGER,master_id TEXT,sheet TEXT,marketplace TEXT,sku TEXT,field TEXT,old_value TEXT,new_value TEXT,kind TEXT);
+CREATE INDEX IF NOT EXISTS idx_changes_master ON changes(master_id,run_id);
 CREATE TABLE IF NOT EXISTS custom_maps(master_id TEXT,sheet TEXT,map_json TEXT,PRIMARY KEY(master_id,sheet));
 '''
 
-def db_connect(path):
-    con=sqlite3.connect(path,timeout=30);con.row_factory=sqlite3.Row;con.executescript(DDL);return con
+# Skema setara untuk Postgres (Neon). DOUBLE PRECISION dipakai agar angka Rupiah tidak kehilangan presisi.
+PG_DDL=[
+ 'CREATE TABLE IF NOT EXISTS masters(master_id TEXT PRIMARY KEY, source_name TEXT NOT NULL, last_hash TEXT, last_run BIGINT, updated_at TEXT)',
+ 'CREATE TABLE IF NOT EXISTS runs(run_id BIGSERIAL PRIMARY KEY,master_id TEXT NOT NULL,source_name TEXT,file_hash TEXT,sync_time TEXT,sheet_count INTEGER,source_rows INTEGER,records INTEGER,issues INTEGER)',
+ 'CREATE TABLE IF NOT EXISTS items(run_id BIGINT NOT NULL,master_id TEXT NOT NULL,sheet TEXT NOT NULL,source_row INTEGER NOT NULL,marketplace TEXT NOT NULL,sku TEXT,name TEXT,hpp DOUBLE PRECISION,price DOUBLE PRECISION,old_fee DOUBLE PRECISION,old_pct DOUBLE PRECISION,old_margin DOUBLE PRECISION,validation TEXT,PRIMARY KEY(run_id,sheet,source_row,marketplace))',
+ 'CREATE INDEX IF NOT EXISTS idx_items_master ON items(master_id,run_id)',
+ 'CREATE INDEX IF NOT EXISTS idx_items_sku ON items(marketplace,sku)',
+ 'CREATE TABLE IF NOT EXISTS sheet_maps(master_id TEXT,sheet TEXT,map_json TEXT,status TEXT,reason TEXT,updated_at TEXT,PRIMARY KEY(master_id,sheet))',
+ 'CREATE TABLE IF NOT EXISTS changes(run_id BIGINT,master_id TEXT,sheet TEXT,marketplace TEXT,sku TEXT,field TEXT,old_value TEXT,new_value TEXT,kind TEXT)',
+ 'CREATE INDEX IF NOT EXISTS idx_changes_master ON changes(master_id,run_id)',
+ 'CREATE TABLE IF NOT EXISTS custom_maps(master_id TEXT,sheet TEXT,map_json TEXT,PRIMARY KEY(master_id,sheet))',
+]
+
+def is_postgres(target):
+    return isinstance(target,str) and target.startswith(('postgres://','postgresql://'))
+
+class Database:
+    """Satu antarmuka untuk SQLite (lokal/sementara) dan Postgres (Neon, permanen).
+    Query ditulis dengan placeholder '?' lalu diterjemahkan otomatis untuk Postgres."""
+    def __init__(self,target):
+        self.kind='postgres' if is_postgres(target) else 'sqlite'
+        if self.kind=='postgres':
+            import psycopg
+            from psycopg.rows import dict_row
+            self.con=psycopg.connect(target,row_factory=dict_row,connect_timeout=20,prepare_threshold=None)
+            with self.con.cursor() as cur:
+                for stmt in PG_DDL:cur.execute(stmt)
+            self.con.commit()
+        else:
+            self.con=sqlite3.connect(target,timeout=30);self.con.row_factory=sqlite3.Row;self.con.executescript(DDL)
+    def _sql(self,sql):
+        return sql.replace('?','%s') if self.kind=='postgres' else sql
+    def execute(self,sql,params=()):
+        if self.kind=='postgres':
+            cur=self.con.cursor();cur.execute(self._sql(sql),params);return cur
+        return self.con.execute(sql,params)
+    def executemany(self,sql,rows):
+        rows=list(rows)
+        if not rows:return
+        if self.kind=='postgres':
+            with self.con.cursor() as cur:cur.executemany(self._sql(sql),rows)
+        else:self.con.executemany(sql,rows)
+    def insert_id(self,sql,params,id_col):
+        if self.kind=='postgres':
+            return self.execute(sql+f' RETURNING {id_col}',params).fetchone()[id_col]
+        return self.con.execute(sql,params).lastrowid
+    def begin(self):
+        if self.kind=='sqlite':self.con.execute('BEGIN')
+        # Postgres: transaksi dimulai otomatis dan diakhiri commit()/rollback().
+    def commit(self):self.con.commit()
+    def rollback(self):self.con.rollback()
+    def close(self):
+        try:
+            if self.kind=='postgres':self.con.rollback()
+        finally:self.con.close()
+    def query_df(self,sql,params=()):
+        import pandas as pd
+        cur=self.execute(sql,params)
+        cols=[d[0] for d in cur.description] if cur.description else []
+        rows=cur.fetchall()
+        data=[tuple(r[c] for c in cols) if self.kind=='postgres' else tuple(r) for r in rows]
+        return pd.DataFrame.from_records(data,columns=cols)
+
+def db_connect(target):
+    return Database(target)
+
+def storage_label(target):
+    return 'Permanen · Neon Postgres' if is_postgres(target) else 'Sementara · SQLite di server'
 
 def excel_col(ref):
     m=re.match(r'^([A-Z]+)',ref or '')
@@ -257,9 +324,8 @@ def sync_many(paths, db_path, overrides=None):
                     if r['validation']=='OK':issues+=1
                     r['validation']='SKU_DUPLIKAT_DI_MASTER'
             try:
-                con.execute('BEGIN')
-                cur=con.execute('INSERT INTO runs(master_id,source_name,file_hash,sync_time,sheet_count,source_rows,records,issues) VALUES (?,?,?,?,?,?,?,?)',(master_id,filename,filehash,now,countsheet,source,len(parsed),issues))
-                rid=cur.lastrowid
+                con.begin()
+                rid=con.insert_id('INSERT INTO runs(master_id,source_name,file_hash,sync_time,sheet_count,source_rows,records,issues) VALUES (?,?,?,?,?,?,?,?)',(master_id,filename,filehash,now,countsheet,source,len(parsed),issues),'run_id')
                 con.executemany('INSERT INTO items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',[(rid,r['master_id'],r['sheet'],r['source_row'],r['marketplace'],r['sku'],r['name'],r['hpp'],r['price'],r['old_fee'],r['old_pct'],r['old_margin'],r['validation']) for r in parsed])
                 con.execute('INSERT INTO masters(master_id,source_name,last_hash,last_run,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(master_id) DO UPDATE SET source_name=excluded.source_name,last_hash=excluded.last_hash,last_run=excluded.last_run,updated_at=excluded.updated_at',(master_id,filename,filehash,rid,now))
                 con.executemany('INSERT INTO sheet_maps VALUES(?,?,?,?,?,?) ON CONFLICT(master_id,sheet) DO UPDATE SET map_json=excluded.map_json,status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at',[(master_id,sheet,json.dumps(mapping),status,reason,now) for sheet,mapping,status,reason in maprows])
@@ -268,14 +334,16 @@ def sync_many(paths, db_path, overrides=None):
                     prev=con.execute('SELECT * FROM items WHERE run_id=?',(old['last_run'],)).fetchall()
                     previous={(r['sheet'],r['marketplace'],r['sku']):r for r in prev if r['validation']!='SKU_DUPLIKAT_DI_MASTER'}
                     current={(r['sheet'],r['marketplace'],r['sku']):r for r in parsed if r['validation']!='SKU_DUPLIKAT_DI_MASTER'}
+                    change_rows=[]
                     for k in set(previous)|set(current):
                         a=previous.get(k);b=current.get(k)
                         if a is None or b is None:
-                            con.execute('INSERT INTO changes VALUES(?,?,?,?,?,?,?,?,?)',(rid,master_id,*k,'ROW',str(a is not None),str(b is not None),'ADDED' if b else 'REMOVED'))
+                            change_rows.append((rid,master_id,*k,'ROW',str(a is not None),str(b is not None),'ADDED' if b else 'REMOVED'))
                         else:
                             for fld in ('price','hpp','old_pct','old_fee','old_margin'):
                                 v1=a[fld];v2=b[fld]
-                                if v1!=v2:con.execute('INSERT INTO changes VALUES(?,?,?,?,?,?,?,?,?)',(rid,master_id,*k,fld,str(v1),str(v2),'MODIFIED'))
+                                if v1!=v2:change_rows.append((rid,master_id,*k,fld,str(v1),str(v2),'MODIFIED'))
+                    con.executemany('INSERT INTO changes VALUES(?,?,?,?,?,?,?,?,?)',change_rows)
                 con.commit()
             except Exception:
                 con.rollback();raise

@@ -9,10 +9,20 @@
 - Opsi tambahan: margin minimum Rupiah, batas komisi, batas kenaikan per evaluasi.
 - Uji: `python test_v53.py` (contoh kasus + 60.000 kasus acak).
 
+## Riwayat permanen (Neon Postgres, gratis)
+- Jika `DATABASE_URL` diisi di **Streamlit → Settings → Secrets**, semua upload, snapshot, dan perubahan master disimpan permanen di Neon Postgres. Tidak hilang saat app restart, PC mati, atau server berhenti.
+- Jika kosong, app tetap jalan dengan SQLite sementara (seperti sebelumnya). Lencana di sidebar menunjukkan mode yang aktif.
+- Format secrets:
+  ```toml
+  DATABASE_URL = "postgresql://USER:PASSWORD@HOST/neondb?sslmode=require"
+  ```
+- Jangan pernah menaruh `DATABASE_URL` di GitHub. `.streamlit/secrets.toml` sudah ada di `.gitignore`.
+- Tab **Perubahan master** menampilkan perubahan setiap upload dibanding upload sebelumnya (komisi, harga, HPP, biaya affiliate, margin, SKU baru/hilang). Tab **Mapping & histori** menampilkan semua upload tersimpan.
+
 ## Desain
 Tema gelap indigo dengan aksen spektrum cyan–iris–magenta, font Unbounded + Manrope, panel "Spektrum rekomendasi", tab segmented control.
 
-File yang diganti/ditambah: `app.py`, `engine.py`, `README.md`, `test_v53.py`, dan `.streamlit/config.toml` (tema warna & font, wajib di-upload).
+File: `app.py`, `engine.py`, `requirements.txt` (menambah `psycopg`), `README.md`, `test_v53.py`, dan `.streamlit/config.toml` (tema warna & font).
 
 # V5.2 · Elegant Hybrid UI Refresh
 
