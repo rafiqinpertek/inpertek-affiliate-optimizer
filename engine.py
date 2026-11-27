@@ -242,8 +242,11 @@ def read_workbook(path):
                 green=bool(c and c.group(1).decode().upper().endswith('92D050'))
             yield sheet,green,SheetRows(z,fn,shared)
 
+# Naikkan versi ini bila cara membaca/memetakan Excel berubah, agar file yang sama diproses ulang.
+PARSER_VERSION='5.3-judul-kolom'
+
 def file_sha256(path):
-    h=hashlib.sha256()
+    h=hashlib.sha256(PARSER_VERSION.encode()+b'|')
     with open(path,'rb') as f:
         for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)
     return h.hexdigest()
@@ -259,29 +262,67 @@ def column_name(n):
         n,j=divmod(n-1,26);x=chr(65+j)+x
     return x
 
+SECTION_TITLES={
+    'tok':('SHOP TOKOPEDIA','TOKOPEDIA','TIKTOK','TIKTOK SHOP','TOKOPEDIA / TIKTOK','SHOP TOKOPEDIA / TIKTOK','TOKOPEDIA & TIKTOK'),
+    'shp':('SHOPEE','SHOP SHOPEE'),
+}
+
+def _norm_label(v):
+    return ' '.join(str(v or '').upper().split())
+
+def header_mapping(sample):
+    """Kenali kolom dari judul di baris 1-4: SKU, NAMA, HPP, lalu di tiap bagian marketplace
+    (judul bagian di baris 1) cari HARGA JUAL (INC), AFF (nominal; tarif = kolom sebelahnya), dan L/R.
+    Mengembalikan None bila ada judul yang tidak ditemukan."""
+    head={rn:vals for rn,vals in sample if 1<=rn<=4}
+    if not head:return None
+    cols=sorted(set().union(*[set(v) for v in head.values()]),key=column_index)
+    labels={c:[_norm_label(head.get(r,{}).get(c)) for r in (1,2,3,4)] for c in cols}
+    row1={c:labels[c][0] for c in cols if labels[c][0]}
+    def find(pred,start=0,end=10**9):
+        for c in cols:
+            i=column_index(c)
+            if start<=i<end and any(pred(x) for x in labels[c] if x):return c
+        return None
+    sku=find(lambda x:x=='SKU');name=find(lambda x:x in('NAMA','NAMA PRODUK','NAMA BARANG'));hpp=find(lambda x:x.startswith('HPP'))
+    if not (sku and name and hpp):return None
+    mapping={'sku':sku,'name':name,'hpp':hpp}
+    for prefix,titles in SECTION_TITLES.items():
+        start=next((column_index(c) for c in cols if row1.get(c) in titles),None)
+        if start is None:return None
+        end=next((column_index(c) for c in cols if column_index(c)>start and c in row1),10**9)
+        price=find(lambda x:x=='HARGA JUAL (INC)',start,end)
+        fee=find(lambda x:x=='AFF',start,end)
+        lr=find(lambda x:x=='L/R',column_index(fee) if fee else start,end)
+        if not (price and fee and lr):return None
+        mapping.update({f'{prefix}_price':price,f'{prefix}_fee':fee,f'{prefix}_rate':column_name(column_index(fee)+1),f'{prefix}_margin':lr})
+    return mapping if set(mapping)==set(STANDARD) else None
+
 def try_detect_mapping(sample):
-    # Offset templates are recognized ONLY when commission reconciliation confirms them.
+    # Tebakan geser kolom hanya diterima bila dibuktikan oleh komisi NYATA (nominal > 0),
+    # karena komisi 0 cocok dengan posisi kolom mana pun.
     for delta in range(-25,26):
         if delta==0:continue
         mapping={k:column_name(column_index(v)+delta) for k,v in STANDARD.items() if column_index(v)+delta>0}
         if len(mapping)!=len(STANDARD):continue
-        ok,reason=assess_mapping(sample,mapping)
+        ok,reason=assess_mapping(sample,mapping,require_nonzero=True)
         if ok:return mapping,f'Geser {delta:+d} kolom; {reason}'
     return None,None
 
-def assess_mapping(rows,mapping):
+def assess_mapping(rows,mapping,require_nonzero=False):
     """Validate candidate on sample product rows; reject blind cross-template offset matches."""
-    inspected=0;checks=0;matched=0;sku_count=0;numeric_count=0
+    inspected=0;checks=0;matched=0;sku_count=0;numeric_count=0;skus=set()
     for rn,r in rows:
         if rn<5:continue
         sku=str(r.get(mapping['sku'],'') or '').strip()
         if not sku or sku.upper() in ('SKU','NAMA SKU'):continue
-        inspected+=1;sku_count+=bool(re.search('[A-Za-z0-9]',sku))
+        inspected+=1;sku_count+=bool(re.search('[A-Za-z0-9]',sku));skus.add(sku)
         if num(r.get(mapping['hpp'])) is not None:numeric_count+=1
         for _,keys in MARKETS.items():
             p,f,rate,_=keys
             price=num(r.get(mapping[p]));fee=num(r.get(mapping[f]));pct=num(r.get(mapping[rate]))
             if price is None or fee is None or pct is None or price<=0:continue
+            if require_nonzero and fee<=0:continue
             checks+=1
             if abs(price*pct-fee)<=max(3,abs(fee)*0.002):matched+=1
         if inspected>=65:break
@@ -290,6 +331,7 @@ def assess_mapping(rows,mapping):
     ratio=matched/checks
     if ratio<0.80:return False,f'Perhitungan komisi tidak cocok ({matched}/{checks} contoh); mapping ditahan'
     if sku_count/inspected<0.8:return False,'Kolom SKU tidak meyakinkan'
+    if inspected>=5 and len(skus)/inspected<0.5:return False,f'Kolom SKU tidak meyakinkan: hanya {len(skus)} nilai berbeda dari {inspected} baris'
     return True,f'Terverifikasi {matched}/{checks} perhitungan ({ratio:.0%}) pada sampel'
 
 def validate(rec):
@@ -407,8 +449,16 @@ def sync_many(paths, db_path, overrides=None):
                 for j,(rn,r) in enumerate(it):
                     sample.append((rn,r))
                     if j>=85:break
-                mapping=overrides.get((master_id,sheet)) or STANDARD
-                ok,reason=assess_mapping(sample,mapping)
+                mapping=overrides.get((master_id,sheet))
+                ok=False;reason=''
+                if mapping is None:
+                    hm=header_mapping(sample)
+                    if hm:
+                        ok,reason=assess_mapping(sample,hm)
+                        if ok:mapping=hm;reason='Kolom dikenali dari judul kolom; '+reason
+                if not ok:
+                    mapping=mapping or STANDARD
+                    ok,reason=assess_mapping(sample,mapping)
                 if not ok and (master_id,sheet) not in overrides:
                     detected,detected_reason=try_detect_mapping(sample)
                     if detected:

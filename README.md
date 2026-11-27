@@ -20,6 +20,12 @@
 - **Hapus data** (tab Mapping & histori → "Hapus data tersimpan"): hapus satu upload, satu master beserta riwayatnya, atau semua data. Wajib ketik konfirmasi (`HAPUS`, nama file master, atau `HAPUS SEMUA`). Saat satu upload dihapus, riwayat perubahan upload sesudahnya dihitung ulang terhadap upload sebelumnya, dan bila yang dihapus upload terbaru, analisis kembali memakai upload sebelumnya.
 - Tab **Perubahan master** menampilkan perubahan setiap upload dibanding upload sebelumnya (komisi, harga, HPP, biaya affiliate, margin, SKU baru/hilang). Tab **Mapping & histori** menampilkan semua upload tersimpan.
 
+## Pengenalan kolom master
+1. **Dari judul kolom (utama):** SKU, NAMA, HPP di baris 1–4; lalu di bagian SHOP TOKOPEDIA dan SHOPEE (judul di baris 1) dicari HARGA JUAL (INC), AFF (nominal; tarif = kolom sebelahnya), dan L/R. Dipakai bila semua judul ditemukan dan hitungannya terverifikasi.
+2. **Posisi standar** (D, E, N, CC, DA, DB, DH, EM, FL, FM, FS).
+3. **Tebakan geser kolom (terakhir):** hanya diterima bila dibuktikan komisi nyata (nominal > 0) dan kolom SKU berisi nilai yang beragam.
+- `PARSER_VERSION` di `engine.py` ikut masuk sidik file, jadi saat cara baca diperbarui, file yang sama diproses ulang.
+
 ## Performa
 - Analisis komisi di-cache: hanya dihitung ulang saat data master atau pengaturan kebijakan berubah. Klik tab/filter tidak menghitung ulang semuanya.
 - File Excel/CSV dibuat **saat tombol download diklik**, tidak di setiap klik lain.
