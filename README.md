@@ -20,6 +20,13 @@
 - **Hapus data** (tab Mapping & histori → "Hapus data tersimpan"): hapus satu upload, satu master beserta riwayatnya, atau semua data. Wajib ketik konfirmasi (`HAPUS`, nama file master, atau `HAPUS SEMUA`). Saat satu upload dihapus, riwayat perubahan upload sesudahnya dihitung ulang terhadap upload sebelumnya, dan bila yang dihapus upload terbaru, analisis kembali memakai upload sebelumnya.
 - Tab **Perubahan master** menampilkan perubahan setiap upload dibanding upload sebelumnya (komisi, harga, HPP, biaya affiliate, margin, SKU baru/hilang). Tab **Mapping & histori** menampilkan semua upload tersimpan.
 
+## Performa
+- Analisis komisi di-cache: hanya dihitung ulang saat data master atau pengaturan kebijakan berubah. Klik tab/filter tidak menghitung ulang semuanya.
+- File Excel/CSV dibuat **saat tombol download diklik**, tidak di setiap klik lain.
+- Tabel ditampilkan per halaman (500 baris) agar halaman ringan; file download tetap berisi semua baris.
+- Pembacaan Excel hanya mengambil kolom yang dipakai setelah mapping dikenali (hasil identik dengan cara lama). Postgres memakai `COPY` untuk simpan massal.
+- Upload banyak master diproses satu per satu dengan progress bar; kotak upload dikosongkan setelah selesai agar memori server lega.
+
 ## Desain
 Tema gelap indigo dengan aksen spektrum cyan–iris–magenta, font Unbounded + Manrope, panel "Spektrum rekomendasi", tab segmented control.
 

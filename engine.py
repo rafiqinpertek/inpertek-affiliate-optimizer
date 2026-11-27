@@ -1,6 +1,7 @@
 """Read-only multi-master engine. Sources never modified. Python 3.10+."""
 from __future__ import annotations
 import collections, hashlib, json, math, os, posixpath, re, sqlite3, tempfile, zipfile
+from lxml import etree as LET
 from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 
@@ -37,6 +38,9 @@ PG_DDL=[
  'CREATE TABLE IF NOT EXISTS custom_maps(master_id TEXT,sheet TEXT,map_json TEXT,PRIMARY KEY(master_id,sheet))',
 ]
 
+ITEM_COLS=('run_id','master_id','sheet','source_row','marketplace','sku','name','hpp','price','old_fee','old_pct','old_margin','validation')
+CHANGE_COLS=('run_id','master_id','sheet','marketplace','sku','field','old_value','new_value','kind')
+
 def is_postgres(target):
     return isinstance(target,str) and target.startswith(('postgres://','postgresql://'))
 
@@ -66,6 +70,16 @@ class Database:
         if self.kind=='postgres':
             with self.con.cursor() as cur:cur.executemany(self._sql(sql),rows)
         else:self.con.executemany(sql,rows)
+    def bulk_insert(self,table,cols,rows):
+        """Sisip banyak baris sekaligus. Postgres memakai COPY (jauh lebih cepat lewat internet)."""
+        rows=list(rows)
+        if not rows:return
+        if self.kind=='postgres':
+            with self.con.cursor() as cur:
+                with cur.copy(f"COPY {table} ({','.join(cols)}) FROM STDIN") as cp:
+                    for r in rows:cp.write_row(r)
+        else:
+            self.con.executemany(f"INSERT INTO {table}({','.join(cols)}) VALUES({','.join('?' for _ in cols)})",rows)
     def insert_id(self,sql,params,id_col):
         if self.kind=='postgres':
             return self.execute(sql+f' RETURNING {id_col}',params).fetchone()[id_col]
@@ -114,22 +128,111 @@ def cell_value(c,shared):
     if c.get('t')=='inlineStr':return ''.join(e.text or '' for e in c.iter(M+'t'))
     return None
 
+_DIGITS='0123456789'
+
+def _col_of(ref):
+    """Huruf kolom dari referensi sel (mis. 'CC12' -> 'CC'); hasil sama persis dengan excel_col, tapi lebih cepat."""
+    if not ref:return ''
+    col=ref.rstrip(_DIGITS)
+    if col and col.isalpha() and col.isupper() and col.isascii():return col
+    return excel_col(ref)
+
+_ROW_END=re.compile(rb'</(?:\w+:)?row>')
+_V_SIMPLE=re.compile(rb'^\s*<(?:\w+:)?v>([^<&]*)</(?:\w+:)?v>\s*$')
+
+def _cell_regex(cols):
+    alt=b'|'.join(re.escape(c.encode()) for c in sorted(cols,key=len,reverse=True))
+    return re.compile(rb'<(?:\w+:)?c\b([^>]*?)\br=(["\'])('+alt+rb')(\d+)\2([^>]*?)(?:/>|>(.*?)</(?:\w+:)?c>)',re.S)
+
+_T_ATTR=re.compile(rb'\bt=(["\'])(.*?)\1')
+
+class SheetRows:
+    """Iterator baris sebuah sheet. Atribut `want` (set huruf kolom) dapat diisi setelah mapping
+    diketahui; sejak itu hanya sel pada kolom yang dipakai yang diambil, langsung dari XML
+    (jalur cepat). Sel berbentuk tidak biasa dibaca ulang dengan parser XML lengkap agar hasil identik."""
+    def __init__(self,z,fn,shared):
+        self.z=z;self.fn=fn;self.shared=shared;self.want=None;self._gen=None;self.last_row=0
+    def __iter__(self):
+        if self._gen is None:self._gen=self._rows()
+        return self._gen
+    def __next__(self):
+        return next(iter(self))
+    def _rows(self):
+        shared=self.shared
+        with self.z.open(self.fn) as fh:
+            for _,el in LET.iterparse(fh,events=('end',),tag=M+'row',huge_tree=True):
+                rownum=int(el.get('r','0'))
+                vals={}
+                for cell in el.iterchildren(M+'c'):
+                    co=_col_of(cell.get('r'))
+                    if co:
+                        value=cell_value(cell,shared)
+                        if value is not None:vals[co]=value
+                el.clear(keep_tail=True)
+                while el.getprevious() is not None:del el.getparent()[0]
+                self.last_row=rownum
+                yield rownum,vals
+                if self.want is not None:break
+        if self.want is not None:
+            yield from self._fast_rows(self.last_row)
+    def _slow_value(self,raw):
+        root=LET.fromstring(b'<root xmlns="'+NS.encode()+b'">'+raw+b'</root>')
+        cell=root[0] if len(root) else None
+        return cell_value(cell,self.shared) if cell is not None else None
+    def _fast_rows(self,after_row):
+        rx=_cell_regex(self.want);shared=self.shared;import html as _h
+        cur=None;vals={}
+        with self.z.open(self.fn) as fh:
+            buf=b''
+            while True:
+                chunk=fh.read(8*1024*1024)
+                if chunk:
+                    buf+=chunk
+                    ends=list(_ROW_END.finditer(buf))
+                    if not ends:continue
+                    cut=ends[-1].end();part=buf[:cut];buf=buf[cut:]
+                else:
+                    part=buf;buf=b''
+                for m in rx.finditer(part):
+                    rownum=int(m.group(4))
+                    if rownum<=after_row:continue
+                    if rownum!=cur:
+                        if cur is not None:yield cur,vals
+                        cur=rownum;vals={}
+                    attrs=m.group(1)+m.group(5);inner=m.group(6)
+                    t=_T_ATTR.search(attrs);t=t.group(2) if t else None
+                    if inner is None:value=None
+                    else:
+                        sv=_V_SIMPLE.match(inner)
+                        if sv and sv.group(1):
+                            txt=sv.group(1).decode('utf-8')
+                            if t==b's':
+                                try:value=shared[int(txt)]
+                                except (ValueError,IndexError):value=None
+                            else:value=txt
+                        else:
+                            value=self._slow_value(m.group(0))
+                    if value is not None:vals[m.group(3).decode()]=value
+                if not chunk:break
+        if cur is not None:yield cur,vals
+
 def read_workbook(path):
     """Yield worksheet name, color flag and row iterator; zip remains open during iteration."""
     with zipfile.ZipFile(path) as z:
         shared=[]
-        if 'xl/sharedStrings.xml' in z.namelist():
+        names=set(z.namelist())
+        if 'xl/sharedStrings.xml' in names:
             with z.open('xl/sharedStrings.xml') as fh:
-                for _,e in ET.iterparse(fh,events=('end',)):
-                    if e.tag==M+'si':
-                        shared.append(''.join(t.text or '' for t in e.iter(M+'t')));e.clear()
+                for _,e in LET.iterparse(fh,events=('end',),tag=M+'si',huge_tree=True):
+                    shared.append(''.join(t.text or '' for t in e.iter(M+'t')));e.clear(keep_tail=True)
+                    while e.getprevious() is not None:del e.getparent()[0]
         wb=ET.fromstring(z.read('xl/workbook.xml'))
         rel=ET.fromstring(z.read('xl/_rels/workbook.xml.rels'))
         relmap={e.get('Id'):e.get('Target') for e in rel}
         for sh in wb.find(M+'sheets'):
             sheet=sh.get('name');target=relmap.get(sh.get('{'+REL+'}id'),'')
             fn=target.lstrip('/') if target.startswith('/') else posixpath.normpath(posixpath.join('xl',target))
-            if fn not in z.namelist():continue
+            if fn not in names:continue
             with z.open(fn) as fh:prefix=fh.read(40000)
             match=re.search(rb'<(?:\w+:)?sheetPr\b.*?</(?:\w+:)?sheetPr>',prefix,re.S)
             # Fallback to root sheetPr node when prefix namespaces have uncommon attributes.
@@ -137,19 +240,13 @@ def read_workbook(path):
             if match:
                 c=re.search(rb'<(?:\w+:)?tabColor\b[^>]*\brgb="([0-9a-fA-F]+)"',match.group(0))
                 green=bool(c and c.group(1).decode().upper().endswith('92D050'))
-            def rowiter():
-                with z.open(fn) as fh:
-                    for _,el in ET.iterparse(fh,events=('end',)):
-                        if el.tag==M+'row':
-                            rownum=int(el.get('r','0'))
-                            vals={}
-                            for cell in el.findall(M+'c'):
-                                co=excel_col(cell.get('r'))
-                                value=cell_value(cell,shared)
-                                if co and value is not None:vals[co]=value
-                            el.clear()
-                            yield rownum,vals
-            yield sheet,green,rowiter()
+            yield sheet,green,SheetRows(z,fn,shared)
+
+def file_sha256(path):
+    h=hashlib.sha256()
+    with open(path,'rb') as f:
+        for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)
+    return h.hexdigest()
 
 def column_index(col):
     n=0
@@ -296,7 +393,7 @@ def sync_many(paths, db_path, overrides=None):
     try:
         for path in paths:
             filename=os.path.basename(path);master_id=filename.casefold()
-            filehash=hashlib.sha256(open(path,'rb').read()).hexdigest()
+            filehash=file_sha256(path)
             old=con.execute('SELECT last_hash,last_run FROM masters WHERE master_id=?',(master_id,)).fetchone()
             has_override=any(k[0]==master_id for k in overrides)
             if old and old['last_hash']==filehash and not has_override:
@@ -319,6 +416,7 @@ def sync_many(paths, db_path, overrides=None):
                 if not ok:
                     skipped.append({'sheet':sheet,'reason':reason});maprows.append((sheet,mapping,'SKIPPED',reason));continue
                 maprows.append((sheet,mapping,'VALIDATED',reason))
+                if isinstance(iterator,SheetRows):iterator.want=set(mapping.values())
                 for rn,r in __import__('itertools').chain(sample,it):
                     if rn<5:continue
                     sku=str(r.get(mapping['sku'],'') or '').strip()
@@ -341,14 +439,14 @@ def sync_many(paths, db_path, overrides=None):
             try:
                 con.begin()
                 rid=con.insert_id('INSERT INTO runs(master_id,source_name,file_hash,sync_time,sheet_count,source_rows,records,issues) VALUES (?,?,?,?,?,?,?,?)',(master_id,filename,filehash,now,countsheet,source,len(parsed),issues),'run_id')
-                con.executemany('INSERT INTO items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',[(rid,r['master_id'],r['sheet'],r['source_row'],r['marketplace'],r['sku'],r['name'],r['hpp'],r['price'],r['old_fee'],r['old_pct'],r['old_margin'],r['validation']) for r in parsed])
+                con.bulk_insert('items',ITEM_COLS,[(rid,r['master_id'],r['sheet'],r['source_row'],r['marketplace'],r['sku'],r['name'],r['hpp'],r['price'],r['old_fee'],r['old_pct'],r['old_margin'],r['validation']) for r in parsed])
                 con.execute('INSERT INTO masters(master_id,source_name,last_hash,last_run,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(master_id) DO UPDATE SET source_name=excluded.source_name,last_hash=excluded.last_hash,last_run=excluded.last_run,updated_at=excluded.updated_at',(master_id,filename,filehash,rid,now))
                 con.executemany('INSERT INTO sheet_maps VALUES(?,?,?,?,?,?) ON CONFLICT(master_id,sheet) DO UPDATE SET map_json=excluded.map_json,status=excluded.status,reason=excluded.reason,updated_at=excluded.updated_at',[(master_id,sheet,json.dumps(mapping),status,reason,now) for sheet,mapping,status,reason in maprows])
                 if old:
                     # Compare only nonduplicated keys, avoiding ungrounded row merges.
                     prev=con.execute('SELECT * FROM items WHERE run_id=?',(old['last_run'],)).fetchall()
                     change_rows=diff_changes(rid,master_id,prev,parsed)
-                    con.executemany('INSERT INTO changes VALUES(?,?,?,?,?,?,?,?,?)',change_rows)
+                    con.bulk_insert('changes',CHANGE_COLS,change_rows)
                 con.commit()
             except Exception:
                 con.rollback();raise
@@ -385,7 +483,7 @@ def delete_run(db_path, run_id):
                 if prev:
                     a=con.execute('SELECT * FROM items WHERE run_id=?',(int(prev['run_id']),)).fetchall()
                     b=con.execute('SELECT * FROM items WHERE run_id=?',(nid,)).fetchall()
-                    con.executemany('INSERT INTO changes VALUES(?,?,?,?,?,?,?,?,?)',diff_changes(nid,master_id,a,b))
+                    con.bulk_insert('changes',CHANGE_COLS,diff_changes(nid,master_id,a,b))
             remaining=con.execute('SELECT run_id,file_hash FROM runs WHERE master_id=? ORDER BY run_id DESC LIMIT 1',(master_id,)).fetchone()
             if remaining:
                 con.execute('UPDATE masters SET last_run=?,last_hash=? WHERE master_id=?',(int(remaining['run_id']),remaining['file_hash'],master_id))

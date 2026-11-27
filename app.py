@@ -4,9 +4,8 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import pandas as pd
 import streamlit as st
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import get_column_letter
+import xlsxwriter
+from functools import partial
 from engine import db_connect, sync_many, analyze, MODES, is_postgres, storage_label, delete_run, delete_master, delete_all
 
 st.set_page_config(page_title='INPERTEK | Affiliate Optimizer V5.3',page_icon='📈',layout='wide')
@@ -196,41 +195,79 @@ def render_deck(master_count,df):
 </section>''',unsafe_allow_html=True)
 
 def prepare_export(df):
-    wb=Workbook();info=wb.active;info.title='PANDUAN'
-    for row in [
-        ['INPERTEK AFFILIATE OPTIMIZER V5.2 - REVIEW INTERNAL'],
+    """Bangun file Excel review. Dipanggil hanya saat tombol download diklik."""
+    file=BytesIO()
+    wb=xlsxwriter.Workbook(file,{'in_memory':True,'nan_inf_to_errors':True,'strings_to_numbers':False,'strings_to_formulas':False,'strings_to_urls':False})
+    head=wb.add_format({'bold':True,'font_color':'#FFFFFF','bg_color':'#17365D','font_name':'Calibri','font_size':10,'valign':'vcenter'})
+    money=wb.add_format({'num_format':'"Rp" #,##0;[Red]("Rp" #,##0);"Rp" 0'})
+    pct=wb.add_format({'num_format':'0.00"%"'})
+    info=wb.add_worksheet('PANDUAN')
+    guide=[
+        ['INPERTEK AFFILIATE OPTIMIZER V5.3 - REVIEW INTERNAL'],
         ['SUMBER','Snapshot master diunggah; master asli tidak diubah'],
         ['PERINGATAN','BUKAN TEMPLATE UPLOAD RESMI MARKETPLACE'],
         ['ALUR','Validasi listing & ketentuan marketplace, review, lalu susun file impor resmi'],
         ['METODE','Asumsi dasar komisi = harga jual. Margin sebelum affiliate = margin master + biaya affiliate awal'],
-        ['BATAS','Sisa margin >= biaya komisi baru, >= margin minimum, dan tidak negatif'],
+        ['BATAS','Sisa margin >= jarak aman x biaya komisi baru (1,25x / 1,5x / 2x sesuai mode), >= margin minimum, dan tidak negatif'],
         ['KEAMANAN','Data master dan database jangan diunggah ke GitHub. Unduh hasil saat analisis selesai'],
         ['DUPLIKAT','SKU berulang antar master / sheet ditahan dari daftar kandidat'],
-    ]:info.append(row)
-    info.column_dimensions['A'].width=23;info.column_dimensions['B'].width=115
-    for title,sub in [('REKOMENDASI',df),('KANDIDAT_REVIEW',df[(df['STATUS'].isin(['NAIK','TURUNKAN'])) & (df['VALIDASI']=='OK') & (~df['DUPLIKAT LINTAS MASTER']) & (df['KOMISI USULAN (%)']>0)])]:
-        ws=wb.create_sheet(title)
+    ]
+    for i,row in enumerate(guide):
+        info.write_row(i,0,row,head if i==0 else None)
+    info.set_column(0,0,23);info.set_column(1,1,115);info.set_row(0,27);info.hide_gridlines(2)
+    cand=df[(df['STATUS'].isin(['NAIK','TURUNKAN'])) & (df['VALIDASI']=='OK') & (~df['DUPLIKAT LINTAS MASTER']) & (df['KOMISI USULAN (%)']>0)]
+    for title,sub in [('REKOMENDASI',df),('KANDIDAT_REVIEW',cand)]:
+        ws=wb.add_worksheet(title)
         fields=[c for c in sub.columns if c!='DUPLIKAT LINTAS MASTER']
-        ws.append(fields)
-        for vals in sub[fields].itertuples(index=False,name=None):ws.append([None if pd.isna(x) else x for x in vals])
-        ws.freeze_panes='F2';ws.auto_filter.ref=ws.dimensions
-        for j,col in enumerate(fields,1):
-            ws.column_dimensions[get_column_letter(j)].width=55 if col in ('NAMA PRODUK','ALASAN') else 24
-            if col in MONEY:
-                for r in range(2,ws.max_row+1):ws.cell(r,j).number_format='"Rp" #,##0;[Red]("Rp" #,##0);"Rp" 0'
-            if col.endswith('(%)'):
-                for r in range(2,ws.max_row+1):ws.cell(r,j).number_format='0.00"%"'
-    for ws in wb:
-        ws.sheet_view.showGridLines=False
-        ws.row_dimensions[1].height=27
-        for c in ws[1]:c.fill=PatternFill('solid',fgColor='17365D');c.font=Font(bold=True,color='FFFFFF',name='Calibri',size=10)
-    file=BytesIO();wb.save(file);return file.getvalue()
+        ws.write_row(0,0,fields,head);ws.set_row(0,27)
+        for j,col in enumerate(fields):
+            fmt=money if col in MONEY else (pct if col.endswith('(%)') else None)
+            ws.set_column(j,j,55 if col in ('NAMA PRODUK','ALASAN') else 24,fmt)
+        data=sub[fields].astype(object).where(sub[fields].notna(),None)
+        for i,vals in enumerate(data.itertuples(index=False,name=None),1):
+            ws.write_row(i,0,vals)
+        ws.freeze_panes(1,5);ws.autofilter(0,0,max(len(sub),1),len(fields)-1);ws.hide_gridlines(2)
+    wb.close();return file.getvalue()
+
+def csv_bytes(df):
+    return df.to_csv(index=False).encode('utf-8-sig')
+
+PAGE_SIZE=500
+def paged_table(df,key,money=(),**kwargs):
+    """Tampilkan tabel per halaman agar halaman ringan; file download tetap berisi semua baris."""
+    n=len(df)
+    if n>PAGE_SIZE:
+        pages=(n-1)//PAGE_SIZE+1
+        c1,c2=st.columns([1,4],vertical_alignment='bottom')
+        p=c1.number_input('Halaman',min_value=1,max_value=pages,value=1,step=1,key=f'pg_{key}_{n}')
+        c2.caption(f'Menampilkan baris {(p-1)*PAGE_SIZE+1:,}–{min(p*PAGE_SIZE,n):,} dari {n:,} ({pages:,} halaman). File download berisi semua baris.'.replace(',','.'))
+        df=df.iloc[(p-1)*PAGE_SIZE:p*PAGE_SIZE]
+    if money:
+        df=df.copy()
+        for c in money:
+            if c in df.columns:df[c]=df[c].map(rupiah)
+    st.dataframe(df,**kwargs)
+
 
 st.markdown('''<header class="hero">
 <h1>Affiliate Commission Optimizer</h1>
 <p>Hitung ulang komisi affiliate per SKU di Shopee dan Tokopedia tanpa menggerus margin. Hanya sheet hijau dengan mapping terverifikasi yang diproses, master asli tidak pernah diubah, dan file ekspor adalah bahan review, bukan template impor marketplace.</p>
 <div class="hero-line"></div>
 </header>''',unsafe_allow_html=True)
+@st.cache_data(show_spinner=False,max_entries=8)
+def analyze_all(db,ids,mode,min_profit,cap,target,step,max_raise):
+    """Analisis per baris untuk seluruh snapshot terpilih. Di-cache: hanya dihitung ulang bila data atau kebijakan berubah."""
+    base=load_items(db,ids)
+    rows=[]
+    for r in base.to_dict('records'):
+        result=analyze(r,mode=mode,min_profit=min_profit,max_pct=cap,target_pct=target,step=step,max_increase=max_raise)
+        rows.append({'MASTER':r['master_name'],'SHEET':r['sheet'],'BARIS':r['source_row'],'MARKETPLACE':r['marketplace'],'SKU':r['sku'],'NAMA PRODUK':r['name'],
+                     'HARGA JUAL (RP)':r['price'],'HPP (RP)':r['hpp'],'KOMISI AWAL (%)':r['old_pct'],'BIAYA AFF AWAL (RP)':r['old_fee'],'MARGIN MASTER (RP)':r['old_margin'],
+                     'MARGIN SEBELUM AFF (RP)':result['margin_before'],'BATAS KOMISI (%)':result['hard_cap'],'KOMISI USULAN (%)':result['proposed_pct'],
+                     'PERUBAHAN KOMISI (POIN %)':(result['proposed_pct']-r['old_pct'] if result['proposed_pct'] is not None and r['old_pct'] is not None else None),'BIAYA KOMISI USULAN (RP)':result['proposed_fee'],'SISA MARGIN USULAN (RP)':result['margin_new'],'SELISIH MARGIN - KOMISI (RP)':result['balance'],'PORSI AFFILIATE DARI MARGIN (%)':(result['affiliate_share']*100 if result['affiliate_share'] is not None else None),
+                     'RASIO MARGIN / KOMISI':(result['margin_new']/result['proposed_fee'] if result['proposed_fee'] and result['margin_new'] is not None else None),'STATUS':result['status'],'VALIDASI':r['validation'],'ALASAN':result['reason']})
+    return pd.DataFrame(rows)
+
 try:db_connect(DB).close()
 except Exception:
     if PERSISTENT:st.error('Tidak bisa terhubung ke database permanen. Periksa DATABASE_URL di Settings → Secrets Streamlit, lalu reboot app. Data lama tetap aman di Neon.')
@@ -244,8 +281,8 @@ with st.sidebar:
     else:st.markdown('<div class="store temp"><i></i>Riwayat sementara: hilang saat app restart</div>',unsafe_allow_html=True)
     st.divider()
     step_header(1,'Upload master')
-    uploads=st.file_uploader('Pilih satu atau beberapa master (.xlsx)',type=['xlsx'],accept_multiple_files=True,help='Prioritas sheet tab hijau. Tidak boleh upload data sensitif ke GitHub.')
-    if st.button('Analisis / sinkronkan master',disabled=not uploads,type='primary',use_container_width=True):
+    uploads=st.file_uploader('Pilih satu atau beberapa master (.xlsx)',type=['xlsx'],accept_multiple_files=True,key=f"uploader_{st.session_state.get('upload_round',0)}",help='Prioritas sheet tab hijau. Tidak boleh upload data sensitif ke GitHub.')
+    if st.button('Analisis / sinkronkan master',disabled=not uploads,type='primary',width='stretch'):
         with tempfile.TemporaryDirectory() as d:
             paths=[]
             for u in uploads:
@@ -255,9 +292,13 @@ with st.sidebar:
                     for chunk in iter(lambda:u.read(1024*1024),b''):f.write(chunk)
                 u.seek(0);paths.append(p)
             try:
-                with st.spinner('Memeriksa worksheet, mapping, nominal affiliate, dan snapshot...'):
-                    results=sync_many(paths,DB)
-                load_history.clear()
+                results=[];bar=st.progress(0.0,text='Menyiapkan...')
+                for k,p in enumerate(paths):
+                    bar.progress(k/len(paths),text=f'Memproses {os.path.basename(p)} ({k+1}/{len(paths)})')
+                    results+=sync_many([p],DB)
+                bar.empty()
+                load_history.clear();analyze_all.clear()
+                st.session_state['upload_round']=st.session_state.get('upload_round',0)+1
                 for r in results:
                     if r['status']=='IMPORTED':
                         st.success(f"{r['file']}: {r['validated_sheets']}/{r['green_sheets']} sheet terverifikasi; {r['records']} baris marketplace; {r['issues']} catatan validasi")
@@ -292,32 +333,24 @@ if chosen.empty:st.warning('Pilih minimal satu master.');con.close();st.stop()
 ids=chosen.last_run.astype(int).tolist()
 mapping=con.query_df('SELECT sm.master_id, m.source_name, sm.sheet, sm.status, sm.reason, sm.map_json FROM sheet_maps sm JOIN masters m ON m.master_id=sm.master_id')
 con.close()
-with st.spinner('Memuat snapshot master...'):
-    base=load_items(DB,tuple(sorted(ids)))
+with st.spinner('Menghitung rekomendasi...'):
+    full=analyze_all(DB,tuple(sorted(ids)),mode,float(min_profit),float(cap),float(target),step,max_raise)
     runs_all,change=load_history(DB,tuple(sorted(chosen.master_id)),int(max(ids)))
 with st.sidebar:
     step_header(3,'Filter data')
     market=st.selectbox('Marketplace',['SEMUA','SHOPEE','TOKOPEDIA'])
-    sheet_filter=st.selectbox('Worksheet sumber',['SEMUA']+sorted(base.sheet.dropna().unique().tolist()))
+    sheet_filter=st.selectbox('Worksheet sumber',['SEMUA']+sorted(full.SHEET.dropna().unique().tolist()))
     keyword=st.text_input('Cari SKU / nama produk')
     validity=st.selectbox('Validasi',['SEMUA','HANYA OK','BERMASALAH'])
-if market!='SEMUA':base=base[base.marketplace==market]
-if sheet_filter!='SEMUA':base=base[base.sheet==sheet_filter]
-if keyword:base=base[base.sku.fillna('').str.contains(keyword,case=False,regex=False)|base.name.fillna('').str.contains(keyword,case=False,regex=False)]
-if validity=='HANYA OK':base=base[base.validation=='OK']
-if validity=='BERMASALAH':base=base[base.validation!='OK']
-if base.empty:st.info('Tidak ada produk sesuai filter.');st.stop()
+output=full
+if market!='SEMUA':output=output[output.MARKETPLACE==market]
+if sheet_filter!='SEMUA':output=output[output.SHEET==sheet_filter]
+if keyword:output=output[output.SKU.fillna('').astype(str).str.contains(keyword,case=False,regex=False)|output['NAMA PRODUK'].fillna('').astype(str).str.contains(keyword,case=False,regex=False)]
+if validity=='HANYA OK':output=output[output.VALIDASI=='OK']
+if validity=='BERMASALAH':output=output[output.VALIDASI!='OK']
+if output.empty:st.info('Tidak ada produk sesuai filter.');st.stop()
+output=output.reset_index(drop=True)
 
-# Analyze in the view, independent of master. Cross-master duplicates are never eligible for export.
-rows=[]
-for r in base.to_dict('records'):
-    result=analyze(r,mode=mode,min_profit=min_profit,max_pct=cap,target_pct=target,step=step,max_increase=max_raise)
-    rows.append({'MASTER':r['master_name'],'SHEET':r['sheet'],'BARIS':r['source_row'],'MARKETPLACE':r['marketplace'],'SKU':r['sku'],'NAMA PRODUK':r['name'],
-                 'HARGA JUAL (RP)':r['price'],'HPP (RP)':r['hpp'],'KOMISI AWAL (%)':r['old_pct'],'BIAYA AFF AWAL (RP)':r['old_fee'],'MARGIN MASTER (RP)':r['old_margin'],
-                 'MARGIN SEBELUM AFF (RP)':result['margin_before'],'BATAS KOMISI (%)':result['hard_cap'],'KOMISI USULAN (%)':result['proposed_pct'],
-                 'PERUBAHAN KOMISI (POIN %)':(result['proposed_pct']-r['old_pct'] if result['proposed_pct'] is not None and r['old_pct'] is not None else None),'BIAYA KOMISI USULAN (RP)':result['proposed_fee'],'SISA MARGIN USULAN (RP)':result['margin_new'],'SELISIH MARGIN - KOMISI (RP)':result['balance'],'PORSI AFFILIATE DARI MARGIN (%)':(result['affiliate_share']*100 if result['affiliate_share'] is not None else None),
-                 'RASIO MARGIN / KOMISI':(result['margin_new']/result['proposed_fee'] if result['proposed_fee'] and result['margin_new'] is not None else None),'STATUS':result['status'],'VALIDASI':r['validation'],'ALASAN':result['reason']})
-output=pd.DataFrame(rows)
 dups=output.duplicated(subset=['MARKETPLACE','SKU'],keep=False)
 output['DUPLIKAT LINTAS MASTER']=dups
 if dups.any():
@@ -330,20 +363,18 @@ with tabs[0]:
     st.caption('Bandingkan tarif komisi awal, tarif usulan, biaya affiliate, serta sisa margin dalam satu tabel. Arahkan kursor ke judul kolom untuk penjelasan.')
     states=st.multiselect('Filter rekomendasi',sorted(output.STATUS.unique().tolist()))
     shown=output[output.STATUS.isin(states)] if states else output
-    display=shown.drop(columns=['DUPLIKAT LINTAS MASTER']).copy()
-    for c in MONEY:display[c]=display[c].map(rupiah)
+    display=shown.drop(columns=['DUPLIKAT LINTAS MASTER'])
     cfg={c:st.column_config.TextColumn(c,help=GUIDE.get(c,'Periksa sumber dan satuan pada kolom ini.'),width='large' if c in ('NAMA PRODUK','ALASAN') else 'medium') for c in display.columns}
-    st.dataframe(display,column_config=cfg,hide_index=True,use_container_width=True,height=480)
-    st.download_button('Download analisis lengkap (Excel)',data=prepare_export(output),file_name='INPERTEK_ANALISIS_V52.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    paged_table(display,'analisis',money=MONEY,column_config=cfg,hide_index=True,width='stretch',height=480)
+    st.download_button('Download analisis lengkap (Excel)',data=partial(prepare_export,output.copy()),file_name='INPERTEK_ANALISIS_V52.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     st.caption('Angka Rupiah ditampilkan dengan pemisah ribuan Indonesia; file Excel tetap menyimpan angka numerik.')
 with tabs[1]:
     valid=output[(output.STATUS.isin(['NAIK','TURUNKAN'])) & (output.VALIDASI=='OK') & (~output['DUPLIKAT LINTAS MASTER']) & (output['KOMISI USULAN (%)']>0)].copy()
     st.metric('Kandidat perubahan yang layak DIREVIEW',len(valid))
     st.warning('Ini daftar REVIEW internal, belum format upload resmi Shopee/Tokopedia. Tidak ada keputusan otomatis yang dikirim ke marketplace.')
-    view_candidate=valid[['MASTER','SHEET','BARIS','MARKETPLACE','SKU','NAMA PRODUK','KOMISI AWAL (%)','KOMISI USULAN (%)','BIAYA KOMISI USULAN (RP)','SISA MARGIN USULAN (RP)','STATUS','ALASAN']].copy()
-    for col in ['BIAYA KOMISI USULAN (RP)','SISA MARGIN USULAN (RP)']:view_candidate[col]=view_candidate[col].map(rupiah)
-    st.dataframe(view_candidate,use_container_width=True,hide_index=True)
-    st.download_button('Download kandidat perubahan (Excel)',prepare_export(output),file_name='INPERTEK_KANDIDAT_REVIEW_V52.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    view_candidate=valid[['MASTER','SHEET','BARIS','MARKETPLACE','SKU','NAMA PRODUK','KOMISI AWAL (%)','KOMISI USULAN (%)','BIAYA KOMISI USULAN (RP)','SISA MARGIN USULAN (RP)','STATUS','ALASAN']]
+    paged_table(view_candidate,'kandidat',money=['BIAYA KOMISI USULAN (RP)','SISA MARGIN USULAN (RP)'],width='stretch',hide_index=True)
+    st.download_button('Download kandidat perubahan (Excel)',partial(prepare_export,output.copy()),file_name='INPERTEK_KANDIDAT_REVIEW_V52.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     st.caption('Gunakan sheet KANDIDAT_REVIEW dalam Excel. SKU ambigu lintas master ditahan.')
 with tabs[2]:
     st.subheader('Validasi data dan SKU ambigu')
@@ -351,8 +382,8 @@ with tabs[2]:
     problems=output[(output.VALIDASI!='OK') | (output['DUPLIKAT LINTAS MASTER'])].copy()
     st.metric('Baris bermasalah / ambigu dalam pilihan ini',len(problems))
     if not problems.empty:
-        st.dataframe(problems[['MASTER','SHEET','BARIS','MARKETPLACE','SKU','VALIDASI','DUPLIKAT LINTAS MASTER','ALASAN']],hide_index=True,use_container_width=True)
-        st.download_button('Download validasi (CSV)',problems.to_csv(index=False).encode('utf-8-sig'),'INPERTEK_VALIDASI_V52.csv','text/csv')
+        paged_table(problems[['MASTER','SHEET','BARIS','MARKETPLACE','SKU','VALIDASI','DUPLIKAT LINTAS MASTER','ALASAN']],'validasi',hide_index=True,width='stretch')
+        st.download_button('Download validasi (CSV)',partial(csv_bytes,problems.copy()),'INPERTEK_VALIDASI_V52.csv','text/csv')
     else:st.success('Tidak ada masalah pada data yang sedang dipilih.')
 with tabs[3]:
     st.subheader('Riwayat perubahan master')
@@ -384,14 +415,20 @@ with tabs[3]:
                            'DATA':cv.field.map(FIELD).fillna(cv.field),'NILAI LAMA':[fmt_val(f,v) for f,v in zip(cv.field,cv.old_value)],
                            'NILAI BARU':[fmt_val(f,v) for f,v in zip(cv.field,cv.new_value)],'JENIS':cv.kind.map(KIND).fillna(cv.kind)})
         if kinds:view=view[view.DATA.isin(kinds)]
-        st.dataframe(view,hide_index=True,use_container_width=True,height=420)
-        st.download_button('Download riwayat perubahan (CSV)',view.to_csv(index=False).encode('utf-8-sig'),'INPERTEK_PERUBAHAN_V53.csv','text/csv')
+        paged_table(view,'perubahan',hide_index=True,width='stretch',height=420)
+        st.download_button('Download riwayat perubahan (CSV)',partial(csv_bytes,view.copy()),'INPERTEK_PERUBAHAN_V53.csv','text/csv')
 with tabs[4]:
     st.subheader('Detail perhitungan untuk satu SKU')
     st.caption('Buka satu produk untuk melihat sumber data, alasan, dan alur hitung usulan komisi secara transparan.')
     if not output.empty:
         # Use a compact index selector and preserve source sheet and original row in its label.
-        opts=output.index.tolist()
+        qsku=st.text_input('Cari SKU atau nama produk',key='detail_q',placeholder='Ketik sebagian SKU atau nama')
+        pool=output
+        if qsku:
+            pool=output[output.SKU.fillna('').astype(str).str.contains(qsku,case=False,regex=False)|output['NAMA PRODUK'].fillna('').astype(str).str.contains(qsku,case=False,regex=False)]
+            if pool.empty:st.warning('Tidak ada SKU yang cocok; menampilkan daftar awal.');pool=output
+        opts=pool.index.tolist()[:300]
+        if len(pool)>300:st.caption(f'Menampilkan 300 dari {len(pool):,} SKU. Ketik di kolom pencarian untuk mempersempit.'.replace(',','.'))
         selected_i=st.selectbox('Pilih SKU / marketplace / master',opts,format_func=lambda i:f"{output.loc[i,'MASTER']} | {output.loc[i,'SKU']} | {output.loc[i,'MARKETPLACE']} | {output.loc[i,'SHEET']} · baris {output.loc[i,'BARIS']}")
         r=output.loc[selected_i]
         a,b,c=st.columns(3)
@@ -410,7 +447,7 @@ with tabs[4]:
                     st.success(f"Sisa margin {r['RASIO MARGIN / KOMISI']:.2f}x biaya komisi baru. Affiliate menerima {r['PORSI AFFILIATE DARI MARGIN (%)']:.0f}% dari margin sebelum affiliate.")
     st.divider()
     st.subheader('Kamus kolom')
-    st.dataframe(pd.DataFrame([{'KOLOM':k,'ARTI / CARA MEMBACA':v} for k,v in GUIDE.items()]),hide_index=True,use_container_width=True)
+    st.dataframe(pd.DataFrame([{'KOLOM':k,'ARTI / CARA MEMBACA':v} for k,v in GUIDE.items()]),hide_index=True,width='stretch')
     st.markdown('**Status:** NAIK = kapasitas margin mendukung kenaikan; TURUNKAN = komisi awal terlalu besar; TETAP = komisi awal sudah pas dengan margin; REVIEW NONAKTIF = kapasitas margin belum cukup; VALIDASI DATA = sumber belum aman dihitung; PELUANG KHUSUS - REVIEW = hanya simulasi manual.')
     st.latex(r'M_{sebelum}=M_{master}+C_{awal}')
     st.latex(r'C_{baru}=Harga\ Jual\times\frac{Persentase\ Komisi}{100}')
@@ -422,13 +459,13 @@ with tabs[4]:
 with tabs[5]:
     st.subheader('Mapping per master dan sheet')
     mapp=mapping[mapping.source_name.isin(selected)]
-    st.dataframe(mapp[['source_name','sheet','status','reason','map_json']],hide_index=True,use_container_width=True)
+    st.dataframe(mapp[['source_name','sheet','status','reason','map_json']],hide_index=True,width='stretch')
     st.subheader('Snapshot terakhir per master')
-    st.dataframe(masters[masters.source_name.isin(selected)],hide_index=True,use_container_width=True)
+    st.dataframe(masters[masters.source_name.isin(selected)],hide_index=True,width='stretch')
     st.subheader('Semua upload tersimpan')
     hist=runs_all.assign(WAKTU=runs_all.sync_time.map(wib))[['master_name','WAKTU','sheet_count','source_rows','records','issues','run_id']]
     hist.columns=['MASTER','WAKTU UPLOAD','SHEET','BARIS SUMBER','BARIS MARKETPLACE','CATATAN VALIDASI','ID SNAPSHOT']
-    st.dataframe(hist,hide_index=True,use_container_width=True)
+    st.dataframe(hist,hide_index=True,width='stretch')
     st.caption(f'Penyimpanan: {storage_label(DB)}. '+('Riwayat tidak hilang saat app restart atau server berhenti.' if PERSISTENT else 'Riwayat hilang saat app restart. Isi DATABASE_URL di Secrets agar permanen.'))
     st.divider()
     with st.expander('Hapus data tersimpan'):
@@ -470,6 +507,6 @@ with tabs[5]:
             except Exception as e:
                 st.error(f'Penghapusan gagal, tidak ada data yang berubah. Detail: {e}')
             else:
-                load_items.clear();load_history.clear()
+                load_items.clear();load_history.clear();analyze_all.clear()
                 for k in [k for k in st.session_state if str(k).startswith('del_')]:del st.session_state[k]
                 st.session_state['flash']=msg;st.rerun()
