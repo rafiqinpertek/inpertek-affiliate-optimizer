@@ -17,6 +17,7 @@
   DATABASE_URL = "postgresql://USER:PASSWORD@HOST/neondb?sslmode=require"
   ```
 - Jangan pernah menaruh `DATABASE_URL` di GitHub. `.streamlit/secrets.toml` sudah ada di `.gitignore`.
+- **Hapus data** (tab Mapping & histori → "Hapus data tersimpan"): hapus satu upload, satu master beserta riwayatnya, atau semua data. Wajib ketik konfirmasi (`HAPUS`, nama file master, atau `HAPUS SEMUA`). Saat satu upload dihapus, riwayat perubahan upload sesudahnya dihitung ulang terhadap upload sebelumnya, dan bila yang dihapus upload terbaru, analisis kembali memakai upload sebelumnya.
 - Tab **Perubahan master** menampilkan perubahan setiap upload dibanding upload sebelumnya (komisi, harga, HPP, biaya affiliate, margin, SKU baru/hilang). Tab **Mapping & histori** menampilkan semua upload tersimpan.
 
 ## Desain

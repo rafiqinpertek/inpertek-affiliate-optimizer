@@ -7,7 +7,7 @@ import streamlit as st
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
-from engine import db_connect, sync_many, analyze, MODES, is_postgres, storage_label
+from engine import db_connect, sync_many, analyze, MODES, is_postgres, storage_label, delete_run, delete_master, delete_all
 
 st.set_page_config(page_title='INPERTEK | Affiliate Optimizer V5.3',page_icon='📈',layout='wide')
 
@@ -99,6 +99,8 @@ html, body, [data-testid="stApp"] { font-family:'Manrope',sans-serif; }
 .stButton button[kind="primary"] { background:var(--spectrum); border:0; color:#0C0F23; font-weight:800; box-shadow:0 8px 26px -10px rgba(139,123,255,.9); }
 .stButton button[kind="primary"]:hover { filter:brightness(1.08); color:#0C0F23; }
 .stButton button[kind="primary"]:disabled { background:var(--rim-soft); color:var(--dim); box-shadow:none; }
+[class*="st-key-del_btn"] button { background:#FF6B8B!important; color:#0C0F23!important; box-shadow:0 8px 26px -12px rgba(255,107,139,.9)!important; }
+[class*="st-key-del_btn"] button:disabled { background:var(--rim-soft)!important; color:var(--dim)!important; box-shadow:none!important; }
 [data-testid="stDownloadButton"] button { border:1px solid var(--rim); background:var(--deck-2); color:var(--frost); font-weight:700; border-radius:10px; }
 [data-testid="stDownloadButton"] button:hover { border-color:var(--ion); color:#fff; box-shadow:0 0 0 3px rgba(92,225,255,.12); }
 button:focus-visible, [role="tab"]:focus-visible { outline:2px solid var(--ion)!important; outline-offset:2px; }
@@ -234,6 +236,7 @@ except Exception:
     if PERSISTENT:st.error('Tidak bisa terhubung ke database permanen. Periksa DATABASE_URL di Settings → Secrets Streamlit, lalu reboot app. Data lama tetap aman di Neon.')
     else:st.error('Database sementara tidak dapat dibuka.')
     st.stop()
+if st.session_state.get('flash'):st.success(st.session_state.pop('flash'))
 
 with st.sidebar:
     st.markdown('<div class="brand"><div class="brand-mark"></div><div><div class="brand-name">INPERTEK</div><div class="brand-sub">Affiliate Optimizer v5.3</div></div></div>',unsafe_allow_html=True)
@@ -427,3 +430,46 @@ with tabs[5]:
     hist.columns=['MASTER','WAKTU UPLOAD','SHEET','BARIS SUMBER','BARIS MARKETPLACE','CATATAN VALIDASI','ID SNAPSHOT']
     st.dataframe(hist,hide_index=True,use_container_width=True)
     st.caption(f'Penyimpanan: {storage_label(DB)}. '+('Riwayat tidak hilang saat app restart atau server berhenti.' if PERSISTENT else 'Riwayat hilang saat app restart. Isi DATABASE_URL di Secrets agar permanen.'))
+    st.divider()
+    with st.expander('Hapus data tersimpan'):
+        st.caption('Penghapusan bersifat permanen dan tidak bisa dibatalkan. Download Excel/CSV dulu bila datanya masih diperlukan.')
+        what=st.radio('Yang mau dihapus',['Satu upload','Satu master beserta riwayatnya','Semua data'],horizontal=True,key='del_what')
+        dcon=db_connect(DB)
+        try:all_runs=dcon.query_df('SELECT r.run_id,r.master_id,r.sync_time,r.records,m.source_name FROM runs r JOIN masters m ON m.master_id=r.master_id ORDER BY r.run_id DESC')
+        finally:dcon.close()
+        target=None
+        if what=='Satu upload':
+            labels={f"{r.source_name}  |  {wib(r.sync_time)}  |  {r.records} baris  |  ID {r.run_id}":int(r.run_id) for r in all_runs.itertuples()}
+            pick=st.selectbox('Pilih upload',list(labels),key='del_run_pick')
+            target=labels.get(pick);word='HAPUS'
+            last_ids=set(masters.last_run.astype(int))
+            if target in last_ids:
+                note='Ini upload terbaru master tersebut. Setelah dihapus, analisis kembali memakai upload sebelumnya. Kalau tidak ada upload lain, masternya ikut terhapus.'
+            else:
+                note='Upload lama ini dihapus. Riwayat perubahan upload sesudahnya dihitung ulang terhadap upload sebelumnya.'
+        elif what=='Satu master beserta riwayatnya':
+            name_to_id=dict(zip(masters.source_name,masters.master_id))
+            pick=st.selectbox('Pilih master',list(name_to_id),key='del_master_pick')
+            target=name_to_id.get(pick);word=pick
+            n=int((all_runs.master_id==target).sum())
+            note=f'Semua {n} upload dan seluruh riwayat perubahan {pick} akan dihapus.'
+        else:
+            word='HAPUS SEMUA'
+            note=f'Semua {len(masters)} master, {len(all_runs)} upload, dan seluruh riwayat perubahan akan dihapus.'
+        st.warning(note)
+        typed=st.text_input(f'Ketik  {word}  untuk konfirmasi',key=f'del_confirm_{what}',placeholder=word)
+        if st.button('Hapus permanen',type='primary',disabled=typed.strip()!=word,key='del_btn'):
+            try:
+                if what=='Satu upload':
+                    res=delete_run(DB,target)
+                    msg='Upload dihapus.' if res['status']=='RUN_DELETED' else 'Upload dihapus. Itu upload satu-satunya, jadi masternya ikut terhapus.'
+                elif what=='Satu master beserta riwayatnya':
+                    delete_master(DB,target);msg=f'Master {word} beserta semua riwayatnya dihapus.'
+                else:
+                    delete_all(DB);msg='Semua data tersimpan dihapus.'
+            except Exception as e:
+                st.error(f'Penghapusan gagal, tidak ada data yang berubah. Detail: {e}')
+            else:
+                load_items.clear();load_history.clear()
+                for k in [k for k in st.session_state if str(k).startswith('del_')]:del st.session_state[k]
+                st.session_state['flash']=msg;st.rerun()

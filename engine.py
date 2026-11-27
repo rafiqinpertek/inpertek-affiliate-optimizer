@@ -272,6 +272,21 @@ def analyze(rec, mode='AGRESIF', min_profit=0, max_pct=30, target_pct=30, step=1
                affiliate_share=cost/before,reason=reason,auto_eligible=status in ('NAIK','TURUNKAN'))
     return out
 
+def diff_changes(rid, master_id, prev_rows, cur_rows):
+    """Bandingkan dua snapshot master yang sama. SKU duplikat diabaikan agar tidak menggabungkan baris yang salah."""
+    previous={(r['sheet'],r['marketplace'],r['sku']):r for r in prev_rows if r['validation']!='SKU_DUPLIKAT_DI_MASTER'}
+    current={(r['sheet'],r['marketplace'],r['sku']):r for r in cur_rows if r['validation']!='SKU_DUPLIKAT_DI_MASTER'}
+    change_rows=[]
+    for k in set(previous)|set(current):
+        a=previous.get(k);b=current.get(k)
+        if a is None or b is None:
+            change_rows.append((rid,master_id,*k,'ROW',str(a is not None),str(b is not None),'ADDED' if b else 'REMOVED'))
+        else:
+            for fld in ('price','hpp','old_pct','old_fee','old_margin'):
+                v1=a[fld];v2=b[fld]
+                if v1!=v2:change_rows.append((rid,master_id,*k,fld,str(v1),str(v2),'MODIFIED'))
+    return change_rows
+
 def sync_many(paths, db_path, overrides=None):
     """Independent source snapshot for each master; transaction per file. Invalid tabs skipped."""
     overrides=overrides or {};results=[]
@@ -332,17 +347,7 @@ def sync_many(paths, db_path, overrides=None):
                 if old:
                     # Compare only nonduplicated keys, avoiding ungrounded row merges.
                     prev=con.execute('SELECT * FROM items WHERE run_id=?',(old['last_run'],)).fetchall()
-                    previous={(r['sheet'],r['marketplace'],r['sku']):r for r in prev if r['validation']!='SKU_DUPLIKAT_DI_MASTER'}
-                    current={(r['sheet'],r['marketplace'],r['sku']):r for r in parsed if r['validation']!='SKU_DUPLIKAT_DI_MASTER'}
-                    change_rows=[]
-                    for k in set(previous)|set(current):
-                        a=previous.get(k);b=current.get(k)
-                        if a is None or b is None:
-                            change_rows.append((rid,master_id,*k,'ROW',str(a is not None),str(b is not None),'ADDED' if b else 'REMOVED'))
-                        else:
-                            for fld in ('price','hpp','old_pct','old_fee','old_margin'):
-                                v1=a[fld];v2=b[fld]
-                                if v1!=v2:change_rows.append((rid,master_id,*k,fld,str(v1),str(v2),'MODIFIED'))
+                    change_rows=diff_changes(rid,master_id,prev,parsed)
                     con.executemany('INSERT INTO changes VALUES(?,?,?,?,?,?,?,?,?)',change_rows)
                 con.commit()
             except Exception:
@@ -350,3 +355,72 @@ def sync_many(paths, db_path, overrides=None):
             results.append({'file':filename,'status':'IMPORTED','run_id':rid,'green_sheets':countsheet,'validated_sheets':sum(x[2]=='VALIDATED' for x in maprows),'source_rows':source,'records':len(parsed),'issues':issues,'skipped':skipped})
     finally:con.close()
     return results
+
+
+# ---------------------------------------------------------------------------
+# Penghapusan data tersimpan. Setiap fungsi berjalan dalam satu transaksi:
+# berhasil semua atau tidak sama sekali.
+# ---------------------------------------------------------------------------
+_MASTER_TABLES=('items','changes','runs','sheet_maps','custom_maps','masters')
+
+def delete_run(db_path, run_id):
+    """Hapus satu upload (snapshot). Riwayat perubahan di sekitarnya dihitung ulang:
+    upload sesudahnya dibandingkan ulang dengan upload sebelumnya yang masih ada.
+    Jika upload ini satu-satunya, master ikut terhapus."""
+    con=db_connect(db_path)
+    try:
+        run=con.execute('SELECT run_id,master_id FROM runs WHERE run_id=?',(int(run_id),)).fetchone()
+        if not run:return {'status':'NOT_FOUND'}
+        master_id=run['master_id'];rid=int(run['run_id'])
+        prev=con.execute('SELECT run_id,file_hash FROM runs WHERE master_id=? AND run_id<? ORDER BY run_id DESC LIMIT 1',(master_id,rid)).fetchone()
+        nxt=con.execute('SELECT run_id FROM runs WHERE master_id=? AND run_id>? ORDER BY run_id LIMIT 1',(master_id,rid)).fetchone()
+        con.begin()
+        try:
+            con.execute('DELETE FROM items WHERE run_id=?',(rid,))
+            con.execute('DELETE FROM changes WHERE run_id=?',(rid,))
+            con.execute('DELETE FROM runs WHERE run_id=?',(rid,))
+            if nxt:
+                nid=int(nxt['run_id'])
+                con.execute('DELETE FROM changes WHERE run_id=?',(nid,))
+                if prev:
+                    a=con.execute('SELECT * FROM items WHERE run_id=?',(int(prev['run_id']),)).fetchall()
+                    b=con.execute('SELECT * FROM items WHERE run_id=?',(nid,)).fetchall()
+                    con.executemany('INSERT INTO changes VALUES(?,?,?,?,?,?,?,?,?)',diff_changes(nid,master_id,a,b))
+            remaining=con.execute('SELECT run_id,file_hash FROM runs WHERE master_id=? ORDER BY run_id DESC LIMIT 1',(master_id,)).fetchone()
+            if remaining:
+                con.execute('UPDATE masters SET last_run=?,last_hash=? WHERE master_id=?',(int(remaining['run_id']),remaining['file_hash'],master_id))
+                status='RUN_DELETED'
+            else:
+                for t in ('sheet_maps','custom_maps','masters'):con.execute(f'DELETE FROM {t} WHERE master_id=?',(master_id,))
+                status='MASTER_DELETED'
+            con.commit()
+        except Exception:
+            con.rollback();raise
+        return {'status':status,'master_id':master_id}
+    finally:con.close()
+
+def delete_master(db_path, master_id):
+    """Hapus satu master beserta semua upload dan riwayat perubahannya."""
+    con=db_connect(db_path)
+    try:
+        con.begin()
+        try:
+            for t in _MASTER_TABLES:con.execute(f'DELETE FROM {t} WHERE master_id=?',(master_id,))
+            con.commit()
+        except Exception:
+            con.rollback();raise
+        return {'status':'MASTER_DELETED','master_id':master_id}
+    finally:con.close()
+
+def delete_all(db_path):
+    """Hapus semua data tersimpan (semua master, upload, dan riwayat)."""
+    con=db_connect(db_path)
+    try:
+        con.begin()
+        try:
+            for t in _MASTER_TABLES:con.execute(f'DELETE FROM {t}')
+            con.commit()
+        except Exception:
+            con.rollback();raise
+        return {'status':'ALL_DELETED'}
+    finally:con.close()
